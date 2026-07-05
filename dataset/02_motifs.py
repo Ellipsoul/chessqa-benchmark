@@ -1,16 +1,17 @@
-import chess
 import argparse
-from typing import List, Tuple
+
+import chess
+
 from utils import (
-    seed_everything,
+    FORMAT_EXAMPLES_BATTERY,
+    FORMAT_EXAMPLES_FORK,
+    FORMAT_EXAMPLES_LINE,
+    FORMAT_EXAMPLES_UCI_MOVE,
+    ChessQuestionAnsweringTask,
+    construct_prompt,
     read_puzzles,
     save_tasks,
-    construct_prompt,
-    FORMAT_EXAMPLES_UCI_MOVE,
-    FORMAT_EXAMPLES_LINE,
-    FORMAT_EXAMPLES_FORK,
-    FORMAT_EXAMPLES_BATTERY,
-    ChessQuestionAnsweringTask
+    seed_everything,
 )
 
 
@@ -40,9 +41,22 @@ def detect_skewers(board):
                         back_piece = board.piece_at(back_square)
                         if back_piece:
                             if back_piece.color == opponent_color:
-                                piece_values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 100}
+                                piece_values = {
+                                    chess.PAWN: 1,
+                                    chess.KNIGHT: 3,
+                                    chess.BISHOP: 3,
+                                    chess.ROOK: 5,
+                                    chess.QUEEN: 9,
+                                    chess.KING: 100,
+                                }
                                 if piece_values[front_piece.piece_type] > piece_values[back_piece.piece_type]:
-                                    skewers.append((chess.square_name(square), chess.square_name(front_square), chess.square_name(back_square)))
+                                    skewers.append(
+                                        (
+                                            chess.square_name(square),
+                                            chess.square_name(front_square),
+                                            chess.square_name(back_square),
+                                        )
+                                    )
                             break
                         current_file += file_step
                         current_rank += rank_step
@@ -57,7 +71,9 @@ def generate_skewer_task(board, found_counter, puzzle_id):
     task_description = "Identify all skewers in this position. A skewer occurs when a more valuable piece is attacked first and forced to move, exposing a less valuable piece behind it to be captured."
     task_description += " For each skewer, provide the key squares in the format: skewering_piece>front_piece>back_piece (e.g., FORMAT_EXAMPLE_PLACEHOLDER).\n"
     suffix = "If more than one, separate with a comma and a space."
-    answer_parts = [f"{skewering_square}>{front_square}>{back_square}" for skewering_square, front_square, back_square in skewers]
+    answer_parts = [
+        f"{skewering_square}>{front_square}>{back_square}" for skewering_square, front_square, back_square in skewers
+    ]
     correct_answer = ", ".join(answer_parts) if answer_parts else "None"
     return ChessQuestionAnsweringTask(
         task_id=f"motifs_skewer_{found_counter['skewer']:04d}",
@@ -68,11 +84,11 @@ def generate_skewer_task(board, found_counter, puzzle_id):
         format_examples=FORMAT_EXAMPLES_LINE,
         correct_answer=correct_answer,
         answer_type="multi",
-        metadata={"puzzle_id": puzzle_id, "n_skewers": len(skewers)}
+        metadata={"puzzle_id": puzzle_id, "n_skewers": len(skewers)},
     )
 
 
-def detect_pins(board: chess.Board) -> List[Tuple[str, str, str]]:
+def detect_pins(board: chess.Board) -> list[tuple[str, str, str]]:
     pins = []
     for color in [chess.WHITE, chess.BLACK]:
         opponent_color = not color
@@ -102,9 +118,18 @@ def detect_pins(board: chess.Board) -> List[Tuple[str, str, str]]:
                     if len(pieces_on_ray) == 2:
                         pinned_square, pinned_piece = pieces_on_ray[0]
                         target_square, target_piece = pieces_on_ray[1]
-                        if (pinned_piece.color == color and target_piece.color == color):
-                            if target_piece.piece_type == chess.KING:
-                                pins.append((chess.square_name(square), chess.square_name(pinned_square), chess.square_name(target_square)))
+                        if (
+                            pinned_piece.color == color
+                            and target_piece.color == color
+                            and target_piece.piece_type == chess.KING
+                        ):
+                            pins.append(
+                                    (
+                                        chess.square_name(square),
+                                        chess.square_name(pinned_square),
+                                        chess.square_name(target_square),
+                                    )
+                                )
     return pins
 
 
@@ -127,7 +152,7 @@ def generate_pin_task(board, found_counter, puzzle_id):
         format_examples=FORMAT_EXAMPLES_LINE,
         correct_answer=correct_answer,
         answer_type="multi",
-        metadata={"puzzle_id": puzzle_id, "n_pins": len(pins)}
+        metadata={"puzzle_id": puzzle_id, "n_pins": len(pins)},
     )
 
 
@@ -156,7 +181,9 @@ def generate_fork_task(board, found_counter, puzzle_id):
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
     task_description = "Identify all forks in this position. A fork occurs when one piece attacks two or more enemy pieces simultaneously."
     task_description += " For each fork, provide the key squares in the format: forking_piece>attacked_piece1-attacked_piece2(-attacked_piece3 ...) (e.g., FORMAT_EXAMPLE_PLACEHOLDER).\n"
-    suffix = "Order attacked pieces alphabetically (a>h, then 1>8). If more than one, separate with a comma and a space."
+    suffix = (
+        "Order attacked pieces alphabetically (a>h, then 1>8). If more than one, separate with a comma and a space."
+    )
     answer_parts = []
     for forking_square, attacked_squares in forks:
         attacked_list = "-".join(sorted(attacked_squares))
@@ -172,7 +199,7 @@ def generate_fork_task(board, found_counter, puzzle_id):
         format_examples=FORMAT_EXAMPLES_FORK,
         correct_answer=correct_answer,
         answer_type="multi",
-        metadata={"puzzle_id": puzzle_id, "n_forks": len(forks)}
+        metadata={"puzzle_id": puzzle_id, "n_forks": len(forks)},
     )
 
 
@@ -202,7 +229,8 @@ def _yield_diag_lines():
         f, r = f0, 0
         while 0 <= f <= 7 and 0 <= r <= 7:
             line.append(chess.square(f, r))
-            f += 1; r += 1
+            f += 1
+            r += 1
         if len(line) >= 2:
             yield "diagonal", line
     for r0 in range(1, 8):
@@ -210,7 +238,8 @@ def _yield_diag_lines():
         f, r = 0, r0
         while 0 <= f <= 7 and 0 <= r <= 7:
             line.append(chess.square(f, r))
-            f += 1; r += 1
+            f += 1
+            r += 1
         if len(line) >= 2:
             yield "diagonal", line
     for f0 in range(7, -1, -1):
@@ -218,7 +247,8 @@ def _yield_diag_lines():
         f, r = f0, 0
         while 0 <= f <= 7 and 0 <= r <= 7:
             line.append(chess.square(f, r))
-            f -= 1; r += 1
+            f -= 1
+            r += 1
         if len(line) >= 2:
             yield "diagonal", line
     for r0 in range(1, 8):
@@ -226,7 +256,8 @@ def _yield_diag_lines():
         f, r = 7, r0
         while 0 <= f <= 7 and 0 <= r <= 7:
             line.append(chess.square(f, r))
-            f -= 1; r += 1
+            f -= 1
+            r += 1
         if len(line) >= 2:
             yield "diagonal", line
 
@@ -253,7 +284,11 @@ def detect_batteries(board):
                 if pj is None:
                     j += 1
                     continue
-                if pj.color == color and pj.piece_type in (chess.BISHOP, chess.ROOK, chess.QUEEN) and _can_use_line(pj.piece_type, line_type):
+                if (
+                    pj.color == color
+                    and pj.piece_type in (chess.BISHOP, chess.ROOK, chess.QUEEN)
+                    and _can_use_line(pj.piece_type, line_type)
+                ):
                     run.append(sqj)
                     j += 1
                     while j < len(line) and board.piece_at(line[j]) is None:
@@ -293,9 +328,8 @@ def generate_battery_task(board, found_counter, puzzle_id):
         format_examples=FORMAT_EXAMPLES_BATTERY,
         correct_answer=correct_answer,
         answer_type="multi",
-        metadata={"puzzle_id": puzzle_id, "n_batteries": len(batteries)}
+        metadata={"puzzle_id": puzzle_id, "n_batteries": len(batteries)},
     )
-
 
 
 def _get_direction_steps(from_square, to_square):
@@ -358,7 +392,9 @@ def detect_discovered_check_moves(board):
                     continue
                 # This is a discovered check
                 if not found_discovered:
-                    results.append((chess.square_name(from_sq), chess.square_name(to_sq), chess.square_name(checker_sq)))
+                    results.append(
+                        (chess.square_name(from_sq), chess.square_name(to_sq), chess.square_name(checker_sq))
+                    )
                     found_discovered = True
                     break  # Only record once per move
         finally:
@@ -371,7 +407,9 @@ def generate_discovered_check_task(board, found_counter, puzzle_id):
     if not moves:
         return None
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
-    task_description = "Identify all discovered-check moves (your move uncovers a check from a rook/bishop/queen on the enemy king)."
+    task_description = (
+        "Identify all discovered-check moves (your move uncovers a check from a rook/bishop/queen on the enemy king)."
+    )
     task_description += " Report each as UCI move (e.g., FORMAT_EXAMPLE_PLACEHOLDER).\n"
     suffix = "If more than one, separate with a comma and a space."
     answer_parts = [f"{f}{t}" for (f, t, _) in moves]
@@ -386,13 +424,12 @@ def generate_discovered_check_task(board, found_counter, puzzle_id):
         format_examples=FORMAT_EXAMPLES_UCI_MOVE,
         correct_answer=correct_answer,
         answer_type="multi",
-        metadata={"puzzle_id": puzzle_id, "n_discovered_checks": len(moves)}
+        metadata={"puzzle_id": puzzle_id, "n_discovered_checks": len(moves)},
     )
 
 
 def detect_double_check_moves(board):
     results = []
-    color = board.turn
     for mv in list(board.legal_moves):
         from_sq = mv.from_square
         to_sq = mv.to_square
@@ -402,7 +439,13 @@ def detect_double_check_moves(board):
                 continue
             checkers = list(chess.SquareSet(board.checkers()))
             if len(checkers) >= 2:
-                results.append((chess.square_name(from_sq), chess.square_name(to_sq), sorted(chess.square_name(s) for s in checkers)))
+                results.append(
+                    (
+                        chess.square_name(from_sq),
+                        chess.square_name(to_sq),
+                        sorted(chess.square_name(s) for s in checkers),
+                    )
+                )
         finally:
             board.pop()
     uniq = []
@@ -435,20 +478,27 @@ def generate_double_check_task(board, found_counter, puzzle_id):
         format_examples=FORMAT_EXAMPLES_UCI_MOVE,
         correct_answer=correct_answer,
         answer_type="multi",
-        metadata={"puzzle_id": puzzle_id, "n_double_checks": len(moves)}
+        metadata={"puzzle_id": puzzle_id, "n_double_checks": len(moves)},
     )
 
 
 def find_tactical_tasks(unique_positions, data, cfg):
     found = []
     found_counter = {"pin": 0, "fork": 0, "battery": 0, "skewer": 0, "discovered_check": 0, "double_check": 0}
-    task_generators = {"pin": generate_pin_task, "fork": generate_fork_task, "battery": generate_battery_task, "skewer": generate_skewer_task, "discovered_check": generate_discovered_check_task, "double_check": generate_double_check_task}
+    task_generators = {
+        "pin": generate_pin_task,
+        "fork": generate_fork_task,
+        "battery": generate_battery_task,
+        "skewer": generate_skewer_task,
+        "discovered_check": generate_discovered_check_task,
+        "double_check": generate_double_check_task,
+    }
 
     for _, row in data.iterrows():
-        puzzle_id = row['PuzzleId']
+        puzzle_id = row["PuzzleId"]
         if puzzle_id in unique_positions:
             continue
-        board = chess.Board(row['FEN'])
+        board = chess.Board(row["FEN"])
         for task_type, task_generator in task_generators.items():
             if found_counter[task_type] >= cfg.N_sample:
                 continue

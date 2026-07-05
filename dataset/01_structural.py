@@ -1,32 +1,34 @@
-import chess
-import chess.pgn
-import json
-import tqdm
 import argparse
 import random
-from typing import List, Tuple, Optional, Dict, Any, Iterator
+from collections.abc import Iterator
+
+import chess
+import chess.pgn
+import tqdm
+
 from utils import (
-    seed_everything,
-    read_puzzles,
-    save_tasks,
-    construct_prompt,
-    get_piece_name,
-    get_piece_arrangement,
-    FORMAT_EXAMPLES_UCI_MOVE,
-    FORMAT_EXAMPLES_SQUARES,
-    FORMAT_EXAMPLES_PIECE,
     FORMAT_EXAMPLES_ARRANGEMENT,
     FORMAT_EXAMPLES_FEN,
+    FORMAT_EXAMPLES_PIECE,
+    FORMAT_EXAMPLES_SQUARES,
+    FORMAT_EXAMPLES_UCI_MOVE,
     FORMAT_EXAMPLES_UCI_MOVE_SAME_START,
-    ChessQuestionAnsweringTask
+    ChessQuestionAnsweringTask,
+    construct_prompt,
+    get_piece_arrangement,
+    get_piece_name,
+    read_puzzles,
+    save_tasks,
+    seed_everything,
 )
+
 
 def detect_piece_arrangement(board: chess.Board) -> str:
     """Return the full piece arrangement of the board."""
     return get_piece_arrangement(board.fen())
 
 
-def detect_legal_moves_piece(board: chess.Board, target_square: str) -> List[str]:
+def detect_legal_moves_piece(board: chess.Board, target_square: str) -> list[str]:
     legal_moves_per_square = {}
 
     for move in board.legal_moves:
@@ -38,7 +40,7 @@ def detect_legal_moves_piece(board: chess.Board, target_square: str) -> List[str
     return legal_moves_per_square.get(target_square, [])
 
 
-def detect_check_detection(board: chess.Board) -> List[str]:
+def detect_check_detection(board: chess.Board) -> list[str]:
     if not board.is_check():
         return []
 
@@ -59,7 +61,7 @@ def detect_check_detection(board: chess.Board) -> List[str]:
     return checking_pieces
 
 
-def detect_check_in_1(board: chess.Board) -> List[str]:
+def detect_check_in_1(board: chess.Board) -> list[str]:
     checking_moves = []
 
     for move in board.legal_moves:
@@ -94,8 +96,9 @@ def is_pinned(board: chess.Board, piece_square: int) -> bool:
     enemy_color = not piece.color
 
     # Check for rook/queen attacks on ranks and files
-    if chess.square_rank(piece_square) == chess.square_rank(king_square) or \
-       chess.square_file(piece_square) == chess.square_file(king_square):
+    if chess.square_rank(piece_square) == chess.square_rank(king_square) or chess.square_file(
+        piece_square
+    ) == chess.square_file(king_square):
         for attacker_square in board.pieces(chess.ROOK, enemy_color) | board.pieces(chess.QUEEN, enemy_color):
             if chess.SquareSet.between(attacker_square, king_square) & attacks_between == attacks_between:
                 # Check if there are no other pieces between attacker and king
@@ -105,8 +108,9 @@ def is_pinned(board: chess.Board, piece_square: int) -> bool:
                     return True
 
     # Check for bishop/queen attacks on diagonals
-    if abs(chess.square_rank(piece_square) - chess.square_rank(king_square)) == \
-       abs(chess.square_file(piece_square) - chess.square_file(king_square)):
+    if abs(chess.square_rank(piece_square) - chess.square_rank(king_square)) == abs(
+        chess.square_file(piece_square) - chess.square_file(king_square)
+    ):
         for attacker_square in board.pieces(chess.BISHOP, enemy_color) | board.pieces(chess.QUEEN, enemy_color):
             if chess.SquareSet.between(attacker_square, king_square) & attacks_between == attacks_between:
                 # Check if there are no other pieces between attacker and king
@@ -118,7 +122,7 @@ def is_pinned(board: chess.Board, piece_square: int) -> bool:
     return False
 
 
-def detect_capture_squares(board: chess.Board, target_square: str) -> List[str]:
+def detect_capture_squares(board: chess.Board, target_square: str) -> list[str]:
     square_index = chess.parse_square(target_square)
     piece = board.piece_at(square_index)
 
@@ -141,7 +145,7 @@ def detect_capture_squares(board: chess.Board, target_square: str) -> List[str]:
     return capture_squares
 
 
-def detect_control_squares(board: chess.Board, target_square: str) -> List[str]:
+def detect_control_squares(board: chess.Board, target_square: str) -> list[str]:
     square_index = chess.parse_square(target_square)
     piece = board.piece_at(square_index)
 
@@ -163,7 +167,7 @@ def detect_control_squares(board: chess.Board, target_square: str) -> List[str]:
     return control_squares
 
 
-def detect_protect_squares(board: chess.Board, target_square: str) -> List[str]:
+def detect_protect_squares(board: chess.Board, target_square: str) -> list[str]:
     square_index = chess.parse_square(target_square)
     piece = board.piece_at(square_index)
 
@@ -186,7 +190,7 @@ def detect_protect_squares(board: chess.Board, target_square: str) -> List[str]:
     return protect_squares
 
 
-def detect_legal_move_all(board: chess.Board) -> List[str]:
+def detect_legal_move_all(board: chess.Board) -> list[str]:
     """Return all legal moves in UCI format."""
     legal_moves = []
     for move in board.legal_moves:
@@ -194,8 +198,9 @@ def detect_legal_move_all(board: chess.Board) -> List[str]:
     return legal_moves
 
 
-
-def generate_piece_arrangement_task(board: chess.Board, found_counter: Dict[str, int], puzzle_id: str) -> ChessQuestionAnsweringTask:
+def generate_piece_arrangement_task(
+    board: chess.Board, found_counter: dict[str, int], puzzle_id: str
+) -> ChessQuestionAnsweringTask:
     correct_answer = detect_piece_arrangement(board)
 
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
@@ -215,13 +220,13 @@ def generate_piece_arrangement_task(board: chess.Board, found_counter: Dict[str,
         format_examples=FORMAT_EXAMPLES_ARRANGEMENT,
         correct_answer=correct_answer,
         answer_type="single",
-        metadata={
-            "puzzle_id": puzzle_id
-        }
+        metadata={"puzzle_id": puzzle_id},
     )
 
 
-def generate_legal_move_piece_task(board: chess.Board, found_counter: Dict[str, int], puzzle_id: str) -> Optional[ChessQuestionAnsweringTask]:
+def generate_legal_move_piece_task(
+    board: chess.Board, found_counter: dict[str, int], puzzle_id: str
+) -> ChessQuestionAnsweringTask | None:
     legal_moves_per_square = {}
 
     for move in board.legal_moves:
@@ -257,19 +262,23 @@ def generate_legal_move_piece_task(board: chess.Board, found_counter: Dict[str, 
         metadata={
             "puzzle_id": puzzle_id,
             "target_square": target_square,
-            "n_moves": len(legal_moves)
-        }
+            "n_moves": len(legal_moves),
+        },
     )
 
 
-def generate_legal_move_all_task(board: chess.Board, found_counter: Dict[str, int], puzzle_id: str) -> Optional[ChessQuestionAnsweringTask]:
+def generate_legal_move_all_task(
+    board: chess.Board, found_counter: dict[str, int], puzzle_id: str
+) -> ChessQuestionAnsweringTask | None:
     legal_moves = detect_legal_move_all(board)
 
     if not legal_moves:
         return None
 
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
-    task_description = "Find all legal moves in this position. List the moves in UCI format, separated by commas and spaces.\n"
+    task_description = (
+        "Find all legal moves in this position. List the moves in UCI format, separated by commas and spaces.\n"
+    )
     suffix = "Example final answer: FORMAT_EXAMPLE_PLACEHOLDER"
 
     correct_answer = ", ".join(sorted(legal_moves))
@@ -283,20 +292,21 @@ def generate_legal_move_all_task(board: chess.Board, found_counter: Dict[str, in
         format_examples=FORMAT_EXAMPLES_UCI_MOVE,
         correct_answer=correct_answer,
         answer_type="multi",
-        metadata={
-            "puzzle_id": puzzle_id,
-            "n_moves": len(legal_moves)
-        }
+        metadata={"puzzle_id": puzzle_id, "n_moves": len(legal_moves)},
     )
 
 
-def generate_check_detection_task(board: chess.Board, found_counter: Dict[str, int], puzzle_id: str) -> Optional[ChessQuestionAnsweringTask]:
+def generate_check_detection_task(
+    board: chess.Board, found_counter: dict[str, int], puzzle_id: str
+) -> ChessQuestionAnsweringTask | None:
     checking_pieces = detect_check_detection(board)
     if not checking_pieces:
         return None
 
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
-    task_description = "In this position, the side to move is in check. Identify the piece(s) that is delivering the check.\n"
+    task_description = (
+        "In this position, the side to move is in check. Identify the piece(s) that is delivering the check.\n"
+    )
     suffix = "List each checking piece with its color, type, and square (e.g., FORMAT_EXAMPLE_PLACEHOLDER). Separate multiple pieces with commas and spaces if applicable."
 
     correct_answer = ", ".join(checking_pieces)
@@ -310,20 +320,21 @@ def generate_check_detection_task(board: chess.Board, found_counter: Dict[str, i
         format_examples=FORMAT_EXAMPLES_PIECE,
         correct_answer=correct_answer,
         answer_type="multi",
-        metadata={
-            "puzzle_id": puzzle_id,
-            "n_checkers": len(checking_pieces)
-        }
+        metadata={"puzzle_id": puzzle_id, "n_checkers": len(checking_pieces)},
     )
 
 
-def generate_check_in_1_task(board: chess.Board, found_counter: Dict[str, int], puzzle_id: str) -> Optional[ChessQuestionAnsweringTask]:
+def generate_check_in_1_task(
+    board: chess.Board, found_counter: dict[str, int], puzzle_id: str
+) -> ChessQuestionAnsweringTask | None:
     checking_moves = detect_check_in_1(board)
     if not checking_moves:
         return None
 
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
-    task_description = "Find all moves that put the opponent in check. List the moves in UCI format, separated by commas and spaces.\n"
+    task_description = (
+        "Find all moves that put the opponent in check. List the moves in UCI format, separated by commas and spaces.\n"
+    )
     suffix = "Example final answer: FORMAT_EXAMPLE_PLACEHOLDER"
 
     correct_answer = ", ".join(sorted(checking_moves))
@@ -337,14 +348,13 @@ def generate_check_in_1_task(board: chess.Board, found_counter: Dict[str, int], 
         format_examples=FORMAT_EXAMPLES_UCI_MOVE,
         correct_answer=correct_answer,
         answer_type="multi",
-        metadata={
-            "puzzle_id": puzzle_id,
-            "n_checking_moves": len(checking_moves)
-        }
+        metadata={"puzzle_id": puzzle_id, "n_checking_moves": len(checking_moves)},
     )
 
 
-def generate_capture_squares_task(board: chess.Board, found_counter: Dict[str, int], puzzle_id: str) -> Optional[ChessQuestionAnsweringTask]:
+def generate_capture_squares_task(
+    board: chess.Board, found_counter: dict[str, int], puzzle_id: str
+) -> ChessQuestionAnsweringTask | None:
     occupied_squares = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
     occupied_squares = [sq for sq in occupied_squares if board.piece_at(sq).piece_type not in [chess.PAWN, chess.KING]]
 
@@ -363,7 +373,9 @@ def generate_capture_squares_task(board: chess.Board, found_counter: Dict[str, i
     # task_description = f"Find all squares that the {piece_name} on {target_square} can capture (reachable squares that have opponent pieces)."
     # task_description += " Exclude captures if the piece is pinned to its king.\n"
     task_description = f"Find all squares that the {piece_name} on {target_square} can capture (i.e. every square that has an opponent piece such that the {piece_name} on {target_square} could legally move to that square and capture the piece).\n"
-    task_description += f"Exclude captures if the {piece_name} on {target_square} is pinned to its king and thus cannot move.\n"
+    task_description += (
+        f"Exclude captures if the {piece_name} on {target_square} is pinned to its king and thus cannot move.\n"
+    )
     suffix = "Example final answer: FORMAT_EXAMPLE_PLACEHOLDER"
 
     correct_answer = ", ".join(sorted(capture_squares))
@@ -382,12 +394,14 @@ def generate_capture_squares_task(board: chess.Board, found_counter: Dict[str, i
             "puzzle_id": puzzle_id,
             "target_square": target_square,
             "piece": piece_name,
-            "n_captures": len(capture_squares)
-        }
+            "n_captures": len(capture_squares),
+        },
     )
 
 
-def generate_control_squares_task(board: chess.Board, found_counter: Dict[str, int], puzzle_id: str) -> Optional[ChessQuestionAnsweringTask]:
+def generate_control_squares_task(
+    board: chess.Board, found_counter: dict[str, int], puzzle_id: str
+) -> ChessQuestionAnsweringTask | None:
     occupied_squares = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
     occupied_squares = [sq for sq in occupied_squares if board.piece_at(sq).piece_type not in [chess.PAWN, chess.KING]]
 
@@ -406,7 +420,9 @@ def generate_control_squares_task(board: chess.Board, found_counter: Dict[str, i
     # task_description = f"Find all squares that the {piece_name} on {target_square} controls (reachable empty squares)."
     # task_description += " Exclude control if the piece is pinned to its king.\n"
     task_description = f"Find all squares that the {piece_name} on {target_square} controls (i.e. every empty square that the {piece_name} on {target_square} could legally move to, excluding squares occupied by any piece).\n"
-    task_description += f"Exclude control if the {piece_name} on {target_square} is pinned to its king and thus cannot move.\n"
+    task_description += (
+        f"Exclude control if the {piece_name} on {target_square} is pinned to its king and thus cannot move.\n"
+    )
     suffix = "Example final answer: FORMAT_EXAMPLE_PLACEHOLDER"
 
     correct_answer = ", ".join(sorted(control_squares))
@@ -425,12 +441,14 @@ def generate_control_squares_task(board: chess.Board, found_counter: Dict[str, i
             "puzzle_id": puzzle_id,
             "target_square": target_square,
             "piece": piece_name,
-            "n_controlled": len(control_squares)
-        }
+            "n_controlled": len(control_squares),
+        },
     )
 
 
-def generate_protect_squares_task(board: chess.Board, found_counter: Dict[str, int], puzzle_id: str) -> Optional[ChessQuestionAnsweringTask]:
+def generate_protect_squares_task(
+    board: chess.Board, found_counter: dict[str, int], puzzle_id: str
+) -> ChessQuestionAnsweringTask | None:
     occupied_squares = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
     occupied_squares = [sq for sq in occupied_squares if board.piece_at(sq).piece_type not in [chess.PAWN, chess.KING]]
 
@@ -444,7 +462,7 @@ def generate_protect_squares_task(board: chess.Board, found_counter: Dict[str, i
     protect_squares = detect_protect_squares(board, target_square)
 
     piece_name = get_piece_name(piece)
-    
+
     # You are given a chess position in FEN: r4r2/pb2ppkp/1p4p1/2pq4/8/1P1P4/P1PN1PPP/R2Q1RK1 w - - 0 15.
     # CONTEXT_PLACEHOLDERFind all squares that contain pieces that the Black Queen on d5 protects (i.e. every square that contains a piece such that the Black Queen on d5 could legally recapture if an enemy piece captured it, excluding the king since it can't be captured).
     # Exclude protection if Black Queen on d5 is pinned to its king and thus cannot move.
@@ -455,7 +473,9 @@ def generate_protect_squares_task(board: chess.Board, found_counter: Dict[str, i
 
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
     task_description = f"Find all squares that contain pieces that the {piece_name} on {target_square} protects (i.e. every square that contains a piece such that the {piece_name} on {target_square} could legally recapture if an enemy piece captured it, excluding the king since it can't be captured).\n"
-    task_description += f"Exclude protection if the {piece_name} on {target_square} is pinned to its king and thus cannot move.\n"
+    task_description += (
+        f"Exclude protection if the {piece_name} on {target_square} is pinned to its king and thus cannot move.\n"
+    )
     suffix = "Example final answer: FORMAT_EXAMPLE_PLACEHOLDER"
 
     correct_answer = ", ".join(sorted(protect_squares))
@@ -474,13 +494,13 @@ def generate_protect_squares_task(board: chess.Board, found_counter: Dict[str, i
             "puzzle_id": puzzle_id,
             "target_square": target_square,
             "piece": piece_name,
-            "n_protected": len(protect_squares)
-        }
+            "n_protected": len(protect_squares),
+        },
     )
 
 
 def read_pgn_games(pgn_path: str) -> Iterator[chess.pgn.Game]:
-    with open(pgn_path, 'r', encoding='utf-8') as pgn_file:
+    with open(pgn_path, encoding="utf-8") as pgn_file:
         while True:
             game = chess.pgn.read_game(pgn_file)
             if game is None:
@@ -488,8 +508,8 @@ def read_pgn_games(pgn_path: str) -> Iterator[chess.pgn.Game]:
             yield game
 
 
-def extract_game_fragment(game: chess.pgn.Game, start_after_moves: int, track_moves: int) -> Tuple[str, List[str], str]:
-    board = game.board()
+def extract_game_fragment(game: chess.pgn.Game, start_after_moves: int, track_moves: int) -> tuple[str, list[str], str]:
+    game.board()
     all_moves = []
     node = game
     while node.variations:
@@ -503,19 +523,19 @@ def extract_game_fragment(game: chess.pgn.Game, start_after_moves: int, track_mo
     # Start tracking after start_after_moves
     temp_board = game.board()
     temp_node = game
-    for i in range(start_after_moves):
+    for _i in range(start_after_moves):
         temp_node = temp_node.variation(0)
         temp_board.push(temp_node.move)
 
     start_fen = temp_board.fen()
-    moves_uci = all_moves[start_after_moves:start_after_moves + track_moves]
+    moves_uci = all_moves[start_after_moves : start_after_moves + track_moves]
 
     game_id = f"{game.headers.get('Event', 'unknown')}_{game.headers.get('Round', '1')}_{game.headers.get('White', 'w')}_{game.headers.get('Black', 'b')}"
-    game_id = game_id.replace(' ', '_').replace('/', '_')
+    game_id = game_id.replace(" ", "_").replace("/", "_")
     return start_fen, moves_uci, game_id
 
 
-def _apply_uci_moves(start_fen: str, moves_uci: List[str]) -> Tuple[str, List[str]]:
+def _apply_uci_moves(start_fen: str, moves_uci: list[str]) -> tuple[str, list[str]]:
     board = chess.Board(start_fen)
     san_list = []
     for u in moves_uci:
@@ -525,7 +545,13 @@ def _apply_uci_moves(start_fen: str, moves_uci: List[str]) -> Tuple[str, List[st
     return board.fen(), san_list
 
 
-def generate_fen_after_moves_task(game_id: str, start_fen: str, moves: List[str], task_subtype: str, found_counter: dict) -> ChessQuestionAnsweringTask:
+def generate_fen_after_moves_task(
+    game_id: str,
+    start_fen: str,
+    moves: list[str],
+    task_subtype: str,
+    found_counter: dict,
+) -> ChessQuestionAnsweringTask:
     final_fen, san_list = _apply_uci_moves(start_fen, moves)
     moves_str = " ".join(moves)
     prefix = "Given an initial FEN and a sequence of UCI moves, apply the moves in order and output the exact resulting FEN.\n"
@@ -540,7 +566,12 @@ def generate_fen_after_moves_task(game_id: str, start_fen: str, moves: List[str]
         format_examples=FORMAT_EXAMPLES_FEN,
         correct_answer=final_fen,
         answer_type="single",
-        metadata={"game_id": game_id, "moves_uci": moves, "moves_san": san_list, "track_length": len(moves)}
+        metadata={
+            "game_id": game_id,
+            "moves_uci": moves,
+            "moves_san": san_list,
+            "track_length": len(moves),
+        },
     )
 
 
@@ -556,7 +587,7 @@ def find_structural_tasks(unique_positions, data, cfg):
         "structural_control_squares": 0,
         "structural_state_tracking_short": 0,
         "structural_state_tracking_mid": 0,
-        "structural_state_tracking_long": 0
+        "structural_state_tracking_long": 0,
     }
 
     task_generators = {
@@ -567,16 +598,16 @@ def find_structural_tasks(unique_positions, data, cfg):
         "structural_check_in_1": generate_check_in_1_task,
         "structural_capture_squares": generate_capture_squares_task,
         "structural_protect_squares": generate_protect_squares_task,
-        "structural_control_squares": generate_control_squares_task
+        "structural_control_squares": generate_control_squares_task,
     }
 
     found = []
     for _, row in tqdm.tqdm(data.iterrows()):
-        puzzle_id = row['PuzzleId']
+        puzzle_id = row["PuzzleId"]
         if puzzle_id in unique_positions:
             continue
 
-        fen = row['FEN']
+        fen = row["FEN"]
         board = chess.Board(fen)
 
         for task_type, task_generator in task_generators.items():
@@ -591,23 +622,21 @@ def find_structural_tasks(unique_positions, data, cfg):
                     unique_positions.add(puzzle_id)
                     print(f"Found {task.task_type} in puzzle {puzzle_id}, total found: {found_counter}")
                     break
-            except Exception as e:
+            except Exception:
                 continue
 
         if all(found_counter[t] >= cfg.N_sample for t in list(task_generators.keys())):
             break
 
-
     # State tracking subtasks: short (1-5), mid (6-10), long (11-15) moves
-    state_tracking_configs = [
-        ("short", 1, 5),
-        ("mid", 6, 10),
-        ("long", 11, 15)
-    ]
+    state_tracking_configs = [("short", 1, 5), ("mid", 6, 10), ("long", 11, 15)]
 
     for game in read_pgn_games(cfg.pgn_path):
         # Check if all state tracking subtasks are complete
-        if all(found_counter[f"structural_state_tracking_{subtype}"] >= cfg.N_sample for subtype, _, _ in state_tracking_configs):
+        if all(
+            found_counter[f"structural_state_tracking_{subtype}"] >= cfg.N_sample
+            for subtype, _, _ in state_tracking_configs
+        ):
             break
 
         for subtype, min_moves, max_moves in state_tracking_configs:
@@ -622,7 +651,9 @@ def find_structural_tasks(unique_positions, data, cfg):
                 task = generate_fen_after_moves_task(game_id, start_fen, moves, subtype, found_counter)
                 found_counter[f"structural_state_tracking_{subtype}"] += 1
                 found.append(task)
-                print(f"Found structural_state_tracking_{subtype} task in game {game_id} (tracking {len(moves)} moves), total found: {found_counter[f'structural_state_tracking_{subtype}']}")
+                print(
+                    f"Found structural_state_tracking_{subtype} task in game {game_id} (tracking {len(moves)} moves), total found: {found_counter[f'structural_state_tracking_{subtype}']}"
+                )
                 break  # Move to next game after finding one task
 
     return found
@@ -631,7 +662,11 @@ def find_structural_tasks(unique_positions, data, cfg):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--puzzle_path", type=str, default="../../data/raw/lichess_db_puzzle.csv")
-    parser.add_argument("--pgn_path", type=str, default="../../data/raw/lichess_db_broadcast_2025-04.pgn")
+    parser.add_argument(
+        "--pgn_path",
+        type=str,
+        default="../../data/raw/lichess_db_broadcast_2025-04.pgn",
+    )
     parser.add_argument("--output_root", type=str, default="../../data/benchmark")
     parser.add_argument("--N_sample", type=int, default=100)
     parser.add_argument("--min_moves", type=int, default=5)

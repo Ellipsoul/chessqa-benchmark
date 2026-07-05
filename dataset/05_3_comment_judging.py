@@ -27,13 +27,13 @@ Usage:
 """
 
 import argparse
+import gc
 import json
 import os
 import re
 import time
-import gc
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 try:
     from vllm import LLM, SamplingParams
@@ -42,10 +42,12 @@ except Exception:
     raise
 
 
-def _setup_env(model_name: str,
-               enable_prefix_caching: bool = True,
-               attention_backend: str = None,
-               use_flashinfer: bool | None = False) -> None:
+def _setup_env(
+    model_name: str,
+    enable_prefix_caching: bool = True,
+    attention_backend: str = None,
+    use_flashinfer: bool | None = False,
+) -> None:
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -64,8 +66,8 @@ def _setup_env(model_name: str,
             os.environ.setdefault("VLLM_FLASHINFER_CACHE_DISABLED", "1")
 
 
-def load_items(path: Path, max_records: int = 0) -> List[Dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
+def load_items(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
         raise ValueError("Input must be a JSON array")
@@ -74,32 +76,63 @@ def load_items(path: Path, max_records: int = 0) -> List[Dict[str, Any]]:
     return data
 
 
-def save_items(path: Path, items: List[Dict[str, Any]]) -> None:
+def save_items(path: Path, items: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
 
 
 PIECE_WORDS = {
-    "king", "queen", "rook", "bishop", "knight", "pawn",
-    "kingside", "queenside", "file", "rank", "diagonal",
-    "check", "checkmate", "mate", "castle", "castling",
-    "gambit", "fork", "pin", "skewer", "x-ray", "xray",
-    "tempo", "initiative", "zugzwang", "passed pawn", "outpost",
+    "king",
+    "queen",
+    "rook",
+    "bishop",
+    "knight",
+    "pawn",
+    "kingside",
+    "queenside",
+    "file",
+    "rank",
+    "diagonal",
+    "check",
+    "checkmate",
+    "mate",
+    "castle",
+    "castling",
+    "gambit",
+    "fork",
+    "pin",
+    "skewer",
+    "x-ray",
+    "xray",
+    "tempo",
+    "initiative",
+    "zugzwang",
+    "passed pawn",
+    "outpost",
 }
 
 
 SAN_UCI_PATTERNS = [
-    re.compile(r"\b[O0]-O(?:-O)?\b", re.I),           # O-O, O-O-O
-    re.compile(r"\b[a-h][1-8][a-h][1-8]\b"),          # UCI move e2e4
+    re.compile(r"\b[O0]-O(?:-O)?\b", re.I),  # O-O, O-O-O
+    re.compile(r"\b[a-h][1-8][a-h][1-8]\b"),  # UCI move e2e4
     re.compile(r"\b[a-h]x?[a-h][1-8](?:[+#])?\b", re.I),  # SAN-like exd5, Qh4+, etc.
     re.compile(r"\b[QRBNK][a-h]?[1-8]?x?[a-h][1-8](?:[+#])?\b"),  # piece SAN moves
 ]
 
 
 GENERIC_PHRASES = [
-    "i will play", "we will draw", "as they say", "people say", "it is said",
-    "in general", "generally speaking", "quote", "famous quote", "life", "luck",
+    "i will play",
+    "we will draw",
+    "as they say",
+    "people say",
+    "it is said",
+    "in general",
+    "generally speaking",
+    "quote",
+    "famous quote",
+    "life",
+    "luck",
 ]
 
 
@@ -122,12 +155,10 @@ def heuristic_is_relevant(text: str) -> bool:
     if any(w in low for w in PIECE_WORDS):
         return True
     # Square mention (at least one square)
-    if re.search(r"\b[a-h][1-8]\b", t):
-        return True
-    return False
+    return bool(re.search(r"\b[a-h][1-8]\b", t))
 
 
-def build_messages(item: Dict[str, Any]) -> List[Dict[str, str]]:
+def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
     comment = item.get("cleaned_comment") or item.get("comment", "")
     fen_before = item.get("fen_before", "")
     fen_after = item.get("fen_after", "")
@@ -208,8 +239,10 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=8)
     ap.add_argument("--tensor-parallel-size", type=int, default=1)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.80)
-    ap.add_argument("--dtype", type=str, default=None, choices=[None, "auto", "float16", "bfloat16", "float32"], nargs='?')
-    ap.add_argument("--attention-backend", type=str, default=None, choices=[None, "FLASH_ATTN", "XFORMERS"], nargs='?')
+    ap.add_argument(
+        "--dtype", type=str, default=None, choices=[None, "auto", "float16", "bfloat16", "float32"], nargs="?"
+    )
+    ap.add_argument("--attention-backend", type=str, default=None, choices=[None, "FLASH_ATTN", "XFORMERS"], nargs="?")
     gfi = ap.add_mutually_exclusive_group()
     gfi.add_argument("--use-flashinfer", dest="use_flashinfer", action="store_true")
     gfi.add_argument("--no-flashinfer", dest="use_flashinfer", action="store_false")
@@ -226,11 +259,11 @@ def main() -> int:
     args = ap.parse_args()
 
     items = load_items(args.input, args.max_records)
-    kept: List[Dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
 
     # Heuristic prefilter
-    heuristic_labels: List[str] = []
-    to_judge: List[Dict[str, Any]] = []
+    heuristic_labels: list[str] = []
+    to_judge: list[dict[str, Any]] = []
     if args.heuristics:
         for it in items:
             text = it.get("cleaned_comment") or it.get("comment", "")
@@ -240,23 +273,28 @@ def main() -> int:
             else:
                 heuristic_labels.append("DROP")
         # Keep indices for mapping
-        idx_map = [i for i, lab in enumerate(heuristic_labels) if lab == "CANDIDATE"]
+        [i for i, lab in enumerate(heuristic_labels) if lab == "CANDIDATE"]
     else:
         to_judge = items
-        idx_map = list(range(len(items)))
+        list(range(len(items)))
 
     # Setup vLLM
-    _setup_env(args.model, enable_prefix_caching=True, attention_backend=args.attention_backend,
-               use_flashinfer=args.use_flashinfer)
+    _setup_env(
+        args.model,
+        enable_prefix_caching=True,
+        attention_backend=args.attention_backend,
+        use_flashinfer=args.use_flashinfer,
+    )
     try:
         import torch
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
         pass
     gc.collect()
 
-    llm_kwargs: Dict[str, Any] = {
+    llm_kwargs: dict[str, Any] = {
         "model": args.model,
         "max_model_len": int(args.max_model_len),
         "tensor_parallel_size": int(args.tensor_parallel_size),
@@ -270,12 +308,12 @@ def main() -> int:
     sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=int(args.max_tokens))
 
     # Judge in batches
-    labels: List[str] = [None] * len(to_judge)
+    labels: list[str] = [None] * len(to_judge)
     t0 = time.time()
     for i in range(0, len(to_judge), args.batch_size):
-        batch = to_judge[i:i + args.batch_size]
+        batch = to_judge[i : i + args.batch_size]
         prompts = [build_messages(it) for it in batch]
-        chat_kwargs: Dict[str, Any] = {}
+        chat_kwargs: dict[str, Any] = {}
         if args.enable_thinking is not None:
             chat_kwargs["chat_template_kwargs"] = {"enable_thinking": bool(args.enable_thinking)}
         try:
@@ -317,4 +355,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

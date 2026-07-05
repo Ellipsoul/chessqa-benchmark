@@ -1,19 +1,20 @@
 import argparse
 import json
-import os
+import random
 import re
 import time
-import requests
-from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
 from multiprocessing import Pool
-import random
+from pathlib import Path
+from typing import Any
+
 import chess
+import requests
 from tqdm import tqdm
-import pdb
 
 
-def load_tasks(dataset_root: Path, max_tasks: Optional[int] = None, n_samples_per_task: Optional[int] = None) -> List[Dict[str, Any]]:
+def load_tasks(
+    dataset_root: Path, max_tasks: int | None = None, n_samples_per_task: int | None = None
+) -> list[dict[str, Any]]:
     """Load tasks from all JSONL files in dataset root directory with optional sampling per task type."""
     tasks = []
 
@@ -30,7 +31,7 @@ def load_tasks(dataset_root: Path, max_tasks: Optional[int] = None, n_samples_pe
     for file_path in sorted(jsonl_files):
         print(f"Loading {file_path.name}...")
         file_tasks = []
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     file_tasks.append(json.loads(line.strip()))
@@ -43,7 +44,7 @@ def load_tasks(dataset_root: Path, max_tasks: Optional[int] = None, n_samples_pe
         # Group tasks by task_type
         tasks_by_type = {}
         for task in tasks:
-            task_type = task.get('task_type', 'unknown')
+            task_type = task.get("task_type", "unknown")
             if task_type not in tasks_by_type:
                 tasks_by_type[task_type] = []
             tasks_by_type[task_type].append(task)
@@ -74,7 +75,7 @@ def get_context(fen: str) -> str:
     Some dataset entries append move hints after a pipe ("|") like:
     "<FEN> | e2e4 e7e5". Strip that part before parsing.
     """
-    fen_clean = fen.split('|', 1)[0].strip()
+    fen_clean = fen.split("|", 1)[0].strip()
     try:
         board = chess.Board(fen_clean)
     except Exception:
@@ -102,49 +103,46 @@ def get_context(fen: str) -> str:
     return f"Piece arrangement: {arrangement}\nLegal moves: {legal_moves}\n\n"
 
 
-def format_prompt(task: Dict[str, Any], add_context: bool = False, format_example_group: int = 1) -> str:
+def format_prompt(task: dict[str, Any], add_context: bool = False, format_example_group: int = 1) -> str:
     """Format task into prompt."""
-    question = task['question']
+    question = task["question"]
 
-    if add_context and 'input' in task:
-        context = get_context(task['input'])
-        question = question.replace('CONTEXT_PLACEHOLDER', context)
+    if add_context and "input" in task:
+        context = get_context(task["input"])
+        question = question.replace("CONTEXT_PLACEHOLDER", context)
     else:
-        question = question.replace('CONTEXT_PLACEHOLDER', '')
+        question = question.replace("CONTEXT_PLACEHOLDER", "")
 
-    if 'format_examples' in task and task['format_examples']:
-        examples_list = task['format_examples']
+    if "format_examples" in task and task["format_examples"]:
+        examples_list = task["format_examples"]
         if len(examples_list) >= 2:
             # Select specific example based on group (1 or 2)
-            if format_example_group == 2 and len(examples_list) >= 2:
-                example = examples_list[1]
-            else:
-                example = examples_list[0]
+            example = examples_list[1] if format_example_group == 2 and len(examples_list) >= 2 else examples_list[0]
         else:
             # Fallback to first/only example
             example = examples_list[0] if examples_list else ""
-        question = question.replace('FORMAT_EXAMPLE_PLACEHOLDER', example)
+        question = question.replace("FORMAT_EXAMPLE_PLACEHOLDER", example)
 
     return question
 
 
-def extract_answer(response: str) -> Tuple[str, bool]:
+def extract_answer(response: str) -> tuple[str, bool]:
     """Extract final answer and return whether extraction was successful."""
     # Look for the last occurrence of FINAL ANSWER: in the response
-    matches = list(re.finditer(r'FINAL ANSWER:\s*(.+?)(?:\n|$)', response, re.IGNORECASE | re.DOTALL))
+    matches = list(re.finditer(r"FINAL ANSWER:\s*(.+?)(?:\n|$)", response, re.IGNORECASE | re.DOTALL))
     if matches:
         # Take the last match and extract only the answer part (group 1)
         answer = matches[-1].group(1).strip()
         # Remove any leading "FINAL ANSWER:" if it got captured
-        answer = re.sub(r'^FINAL ANSWER:\s*', '', answer, flags=re.IGNORECASE).strip()
+        answer = re.sub(r"^FINAL ANSWER:\s*", "", answer, flags=re.IGNORECASE).strip()
         # Strip markdown formatting (**, *, etc.)
-        answer = re.sub(r'^\*+|\*+$', '', answer).strip()
+        answer = re.sub(r"^\*+|\*+$", "", answer).strip()
         # Strip any remaining whitespace including newlines
         answer = answer.strip()
         return answer, True
 
     # Try to extract from "The final answer is $\boxed{...}$" format
-    boxed_matches = list(re.finditer(r'[Tt]he\s+final\s+answer\s+is\s+\$?\\boxed\{([^}]+)\}\$?', response))
+    boxed_matches = list(re.finditer(r"[Tt]he\s+final\s+answer\s+is\s+\$?\\boxed\{([^}]+)\}\$?", response))
     if boxed_matches:
         # Take the last match and extract the content inside \boxed{}
         answer = boxed_matches[-1].group(1).strip()
@@ -153,7 +151,7 @@ def extract_answer(response: str) -> Tuple[str, bool]:
     return "", False
 
 
-def calculate_total_usage(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def calculate_total_usage(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Calculate total usage statistics from results."""
     total_cost = 0.0
     total_prompt_tokens = 0
@@ -163,38 +161,45 @@ def calculate_total_usage(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     extraction_success_count = 0
 
     for result in results:
-        usage = result.get('inference', {}).get('usage', {})
+        usage = result.get("inference", {}).get("usage", {})
         if usage:
-            total_cost += usage.get('cost', 0.0)
-            total_prompt_tokens += usage.get('prompt_tokens', 0)
-            total_completion_tokens += usage.get('completion_tokens', 0)
-            total_tokens += usage.get('total_tokens', 0)
+            total_cost += usage.get("cost", 0.0)
+            total_prompt_tokens += usage.get("prompt_tokens", 0)
+            total_completion_tokens += usage.get("completion_tokens", 0)
+            total_tokens += usage.get("total_tokens", 0)
         else:
             error_count += 1
 
         # Track extraction success
-        if result.get('inference', {}).get('extraction_successful', False):
+        if result.get("inference", {}).get("extraction_successful", False):
             extraction_success_count += 1
 
     return {
-        'total_cost': total_cost,
-        'total_prompt_tokens': total_prompt_tokens,
-        'total_completion_tokens': total_completion_tokens,
-        'total_tokens': total_tokens,
-        'error_count': error_count,
-        'extraction_success_count': extraction_success_count,
-        'extraction_success_rate': extraction_success_count / len(results) if results else 0.0,
-        'avg_cost_per_task': total_cost / len(results) if results else 0.0,
-        'avg_tokens_per_task': total_tokens / len(results) if results else 0.0,
-        'cost_per_1k_tokens': (total_cost / (total_tokens / 1000)) if total_tokens > 0 else 0.0,
-        'tokens_per_dollar': (total_tokens / total_cost) if total_cost > 0 else 0.0,
-        'avg_prompt_tokens': total_prompt_tokens / len(results) if results else 0.0,
-        'avg_completion_tokens': total_completion_tokens / len(results) if results else 0.0,
-        'completion_ratio': (total_completion_tokens / total_prompt_tokens) if total_prompt_tokens > 0 else 0.0
+        "total_cost": total_cost,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion_tokens,
+        "total_tokens": total_tokens,
+        "error_count": error_count,
+        "extraction_success_count": extraction_success_count,
+        "extraction_success_rate": extraction_success_count / len(results) if results else 0.0,
+        "avg_cost_per_task": total_cost / len(results) if results else 0.0,
+        "avg_tokens_per_task": total_tokens / len(results) if results else 0.0,
+        "cost_per_1k_tokens": (total_cost / (total_tokens / 1000)) if total_tokens > 0 else 0.0,
+        "tokens_per_dollar": (total_tokens / total_cost) if total_cost > 0 else 0.0,
+        "avg_prompt_tokens": total_prompt_tokens / len(results) if results else 0.0,
+        "avg_completion_tokens": total_completion_tokens / len(results) if results else 0.0,
+        "completion_ratio": (total_completion_tokens / total_prompt_tokens) if total_prompt_tokens > 0 else 0.0,
     }
 
 
-def evaluate_answer_with_error_type(extracted: str, correct_answer: str, answer_type: str, extraction_successful: bool, usage: Dict[str, Any], max_tokens: int) -> Tuple[bool, str]:
+def evaluate_answer_with_error_type(
+    extracted: str,
+    correct_answer: str,
+    answer_type: str,
+    extraction_successful: bool,
+    usage: dict[str, Any],
+    max_tokens: int,
+) -> tuple[bool, str]:
     """
     Evaluate extracted answer and return (is_correct, error_type).
 
@@ -209,7 +214,7 @@ def evaluate_answer_with_error_type(extracted: str, correct_answer: str, answer_
     """
 
     # Check for max token reached first (highest priority)
-    completion_tokens = usage.get('completion_tokens', 0)
+    completion_tokens = usage.get("completion_tokens", 0)
     if completion_tokens >= max_tokens * 0.98:  # 98% threshold to account for slight variations
         return False, "max_token_reached"
 
@@ -227,8 +232,8 @@ def evaluate_answer_with_error_type(extracted: str, correct_answer: str, answer_
 
     elif answer_type == "multi":
         # Parse comma-separated values
-        extracted_set = set(item.strip().lower() for item in extracted.split(',') if item.strip())
-        correct_set = set(item.strip().lower() for item in correct_answer.split(',') if item.strip())
+        extracted_set = set(item.strip().lower() for item in extracted.split(",") if item.strip())
+        correct_set = set(item.strip().lower() for item in correct_answer.split(",") if item.strip())
 
         if extracted_set == correct_set:
             return True, "correct"
@@ -256,7 +261,9 @@ def evaluate_answer_with_error_type(extracted: str, correct_answer: str, answer_
 
 def process_single_task(args_tuple):
     """Process a single task - for multiprocessing."""
-    task, model, add_context, format_example_group, api_key, max_retries, timeout, max_tokens, enable_thinking = args_tuple
+    task, model, add_context, format_example_group, api_key, max_retries, timeout, max_tokens, enable_thinking = (
+        args_tuple
+    )
 
     # Create inferencer instance for this process
     # Filename suffix is handled by the parent inferencer when saving; child only calls the API
@@ -268,22 +275,22 @@ def process_single_task(args_tuple):
     extracted, extraction_successful = extract_answer(response)
 
     # Use answer_type-aware evaluation with error type classification
-    answer_type = task.get('answer_type', 'single')
+    answer_type = task.get("answer_type", "single")
     correct, error_type = evaluate_answer_with_error_type(
-        extracted, task['correct_answer'], answer_type, extraction_successful, usage, max_tokens
+        extracted, task["correct_answer"], answer_type, extraction_successful, usage, max_tokens
     )
 
     # Include all original task fields plus inference information
     result = dict(task)  # Copy all original fields
-    result['inference'] = {
-        'prompt': prompt,
-        'response': response,
-        'thinking_content': thinking_content,
-        'extracted': extracted,
-        'extraction_successful': extraction_successful,
-        'is_correct': correct,
-        'error_type': error_type,
-        'usage': usage
+    result["inference"] = {
+        "prompt": prompt,
+        "response": response,
+        "thinking_content": thinking_content,
+        "extracted": extracted,
+        "extraction_successful": extraction_successful,
+        "is_correct": correct,
+        "error_type": error_type,
+        "usage": usage,
     }
     return result
 
@@ -297,8 +304,18 @@ def _build_variant_suffix(add_context: bool, format_example_group: int) -> str:
         parts.append("fmt2")
     return ("-" + "-".join(parts)) if parts else ""
 
+
 class OpenrouterInferencer:
-    def __init__(self, model: str, add_context: bool = False, max_retries: int = 5, timeout: int = 60, max_tokens: int = 2048, enable_thinking: bool = False, filename_suffix: str = ""):
+    def __init__(
+        self,
+        model: str,
+        add_context: bool = False,
+        max_retries: int = 5,
+        timeout: int = 60,
+        max_tokens: int = 2048,
+        enable_thinking: bool = False,
+        filename_suffix: str = "",
+    ):
         self.model = model
         self.add_context = add_context
         self.max_retries = max_retries
@@ -308,96 +325,95 @@ class OpenrouterInferencer:
         # Additional filename suffix to differentiate experiment variants in outputs
         self.filename_suffix = filename_suffix
         keys_path = Path(__file__).parent.parent.parent / "keys" / "api_keys.json"
-        with open(keys_path, 'r') as f:
+        with open(keys_path) as f:
             keys = json.load(f)
         self.api_key = keys.get("openrouter_api_key")
         self.url = "https://openrouter.ai/api/v1/chat/completions"
 
-    def call_model(self, prompt: str) -> Tuple[str, str, Dict[str, Any]]:
+    def call_model(self, prompt: str) -> tuple[str, str, dict[str, Any]]:
         """Call model with exponential retry. Returns (content, thinking_content, usage)."""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
         data = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": self.max_tokens,
-            "usage": {
-                    "include": True
-                }
+            "usage": {"include": True},
         }
 
         if self.enable_thinking:
             data["reasoning"] = {"effort": "medium"}
-        
+
         if self.model == "qwen/qwen3-next-80b-a3b-thinking":
             data["provider"] = {
-                                'order': [
-                                    'google-vertex',
-                                    'together',
-                                ]
-                                }
-        
+                "order": [
+                    "google-vertex",
+                    "together",
+                ]
+            }
+
         if self.model == "deepseek/deepseek-chat-v3.1":
             data["provider"] = {
-                                'order': [
-                                    'fireworks',
-                                ]
-                                }
-        
+                "order": [
+                    "fireworks",
+                ]
+            }
+
         if self.model == "deepseek/deepseek-r1-0528":
             data["provider"] = {
-                                'order': [
-                                    'google-vertex',
-                                ]
-                                }
+                "order": [
+                    "google-vertex",
+                ]
+            }
 
         for attempt in range(self.max_retries):
             try:
                 response = requests.post(
-                    self.url,
-                    headers=headers,
-                    data=json.dumps(data),
-                    timeout=self.timeout,
-                    stream=False
+                    self.url, headers=headers, data=json.dumps(data), timeout=self.timeout, stream=False
                 )
                 response.raise_for_status()
                 result = response.json()
                 # Extract main content
-                content = result['choices'][0]['message']['content'].strip()
+                content = result["choices"][0]["message"]["content"].strip()
 
                 # Extract thinking/reasoning content
                 thinking_content = ""
-                message = result['choices'][0]['message']
+                message = result["choices"][0]["message"]
 
                 # Try different reasoning extraction methods
-                if hasattr(message, 'reasoning') and message.get('reasoning'):
-                    thinking_content = message['reasoning']
-                elif 'reasoning_details' in message and message['reasoning_details']:
+                if hasattr(message, "reasoning") and message.get("reasoning"):
+                    thinking_content = message["reasoning"]
+                elif "reasoning_details" in message and message["reasoning_details"]:
                     reasoning_parts = []
-                    for detail in message['reasoning_details']:
-                        if isinstance(detail, dict) and 'text' in detail:
-                            reasoning_parts.append(detail['text'])
+                    for detail in message["reasoning_details"]:
+                        if isinstance(detail, dict) and "text" in detail:
+                            reasoning_parts.append(detail["text"])
                         elif isinstance(detail, str):
                             reasoning_parts.append(detail)
-                    thinking_content = '\n'.join(reasoning_parts)
-                elif 'reasoning' in message and message['reasoning']:
-                    thinking_content = str(message['reasoning'])
+                    thinking_content = "\n".join(reasoning_parts)
+                elif "reasoning" in message and message["reasoning"]:
+                    thinking_content = str(message["reasoning"])
 
-                usage = result.get('usage', {})
+                usage = result.get("usage", {})
                 return content, thinking_content, usage
 
             except Exception as e:
                 if attempt == self.max_retries - 1:
                     return f"ERROR: {e}", "", {}
                 # Exponential backoff with jitter
-                wait_time = (2 ** attempt) + random.uniform(0, 1)
+                wait_time = (2**attempt) + random.uniform(0, 1)
                 time.sleep(wait_time)
 
-
-    def run_inference(self, tasks: List[Dict[str, Any]], num_workers: int = 1, format_example_group: int = 1, output_path: Optional[str] = None, save_interval: int = 10, existing_results: List[Dict[str, Any]] = None, save_existing_first: bool = False) -> List[Dict[str, Any]]:
+    def run_inference(
+        self,
+        tasks: list[dict[str, Any]],
+        num_workers: int = 1,
+        format_example_group: int = 1,
+        output_path: str | None = None,
+        save_interval: int = 10,
+        existing_results: list[dict[str, Any]] = None,
+        save_existing_first: bool = False,
+    ) -> list[dict[str, Any]]:
         """Run inference on tasks with optional multiprocessing."""
         if existing_results is None:
             existing_results = []
@@ -415,22 +431,22 @@ class OpenrouterInferencer:
                 extracted, extraction_successful = extract_answer(response)
 
                 # Use answer_type-aware evaluation with error type classification
-                answer_type = task.get('answer_type', 'single')
+                answer_type = task.get("answer_type", "single")
                 correct, error_type = evaluate_answer_with_error_type(
-                    extracted, task['correct_answer'], answer_type, extraction_successful, usage, self.max_tokens
+                    extracted, task["correct_answer"], answer_type, extraction_successful, usage, self.max_tokens
                 )
 
                 # Include all original task fields plus inference information
                 result = dict(task)  # Copy all original fields
-                result['inference'] = {
-                    'prompt': prompt,
-                    'response': response,
-                    'thinking_content': thinking_content,
-                    'extracted': extracted,
-                    'extraction_successful': extraction_successful,
-                    'is_correct': correct,
-                    'error_type': error_type,
-                    'usage': usage
+                result["inference"] = {
+                    "prompt": prompt,
+                    "response": response,
+                    "thinking_content": thinking_content,
+                    "extracted": extracted,
+                    "extraction_successful": extraction_successful,
+                    "is_correct": correct,
+                    "error_type": error_type,
+                    "usage": usage,
                 }
                 results.append(result)
 
@@ -453,25 +469,37 @@ class OpenrouterInferencer:
             print(f"Processing {len(tasks)} tasks with {num_workers} workers...")
 
             # Prepare arguments for multiprocessing
-            args_list = [(task, self.model, self.add_context, format_example_group, self.api_key,
-                         self.max_retries, self.timeout, self.max_tokens, self.enable_thinking) for task in tasks]
+            args_list = [
+                (
+                    task,
+                    self.model,
+                    self.add_context,
+                    format_example_group,
+                    self.api_key,
+                    self.max_retries,
+                    self.timeout,
+                    self.max_tokens,
+                    self.enable_thinking,
+                )
+                for task in tasks
+            ]
 
             with Pool(num_workers) as pool:
                 # Use imap for progress tracking
                 results = []
-                for i, result in enumerate(tqdm(pool.imap(process_single_task, args_list),
-                                              total=len(args_list),
-                                              desc="Processing tasks")):
+                for i, result in enumerate(
+                    tqdm(pool.imap(process_single_task, args_list), total=len(args_list), desc="Processing tasks")
+                ):
                     results.append(result)
 
                     # Save every save_interval responses
                     if output_path and (i + 1) % save_interval == 0:
                         # For parallel processing, we need to maintain order first
-                        temp_task_id_to_result = {r['task_id']: r for r in results}
+                        temp_task_id_to_result = {r["task_id"]: r for r in results}
                         temp_ordered_results = []
                         for j in range(i + 1):
-                            if tasks[j]['task_id'] in temp_task_id_to_result:
-                                temp_ordered_results.append(temp_task_id_to_result[tasks[j]['task_id']])
+                            if tasks[j]["task_id"] in temp_task_id_to_result:
+                                temp_ordered_results.append(temp_task_id_to_result[tasks[j]["task_id"]])
                         if len(temp_ordered_results) == i + 1:  # All results up to this point are available
                             # Save only the last save_interval new results
                             start_idx = max(0, len(temp_ordered_results) - save_interval)
@@ -482,28 +510,28 @@ class OpenrouterInferencer:
             if output_path and len(results) % save_interval != 0:
                 remaining_count = len(results) % save_interval
                 # For parallel processing, maintain order
-                temp_task_id_to_result = {r['task_id']: r for r in results}
+                temp_task_id_to_result = {r["task_id"]: r for r in results}
                 temp_ordered_results = []
                 for task in tasks:
-                    if task['task_id'] in temp_task_id_to_result:
-                        temp_ordered_results.append(temp_task_id_to_result[task['task_id']])
+                    if task["task_id"] in temp_task_id_to_result:
+                        temp_ordered_results.append(temp_task_id_to_result[task["task_id"]])
 
                 remaining_results = temp_ordered_results[-remaining_count:]
                 self._save_incremental_results(remaining_results, output_path)
 
             # Maintain original order
-            task_id_to_result = {r['task_id']: r for r in results}
-            ordered_results = [task_id_to_result[task['task_id']] for task in tasks]
+            task_id_to_result = {r["task_id"]: r for r in results}
+            ordered_results = [task_id_to_result[task["task_id"]] for task in tasks]
 
             return ordered_results
 
-    def _save_incremental_results(self, new_results: List[Dict[str, Any]], output_path: str):
+    def _save_incremental_results(self, new_results: list[dict[str, Any]], output_path: str):
         """Append new results to the main results file."""
         try:
             # Get model name from output path and create model-based filename
             output_dir = Path(output_path)
             # Extract model name from the inferencer (need to get it from self.model)
-            model_safe_name = self.model.replace('/', '_').replace(':', '_')
+            model_safe_name = self.model.replace("/", "_").replace(":", "_")
             if self.enable_thinking:
                 model_safe_name += "-thinking"
             # Add variant suffix if provided (e.g., -piecearr, -fmt2)
@@ -512,13 +540,13 @@ class OpenrouterInferencer:
 
             # Append new results to JSONL file
             results_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(results_file, 'a') as f:
+            with open(results_file, "a") as f:
                 for result in new_results:
-                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
             # Calculate current accuracy for progress info
             total = len(new_results)
-            correct = sum(r['inference']['is_correct'] for r in new_results)
+            correct = sum(r["inference"]["is_correct"] for r in new_results)
             accuracy = correct / total if total > 0 else 0.0
 
             print(f"\nIncremental save: {results_file} (+{total} tasks, {accuracy:.3f} accuracy for new tasks)")
@@ -526,13 +554,13 @@ class OpenrouterInferencer:
         except Exception as e:
             print(f"\nWarning: Failed to save incremental results: {e}")
 
-    def _save_existing_results(self, existing_results: List[Dict[str, Any]], output_path: str):
+    def _save_existing_results(self, existing_results: list[dict[str, Any]], output_path: str):
         """Save existing complete results to start the file."""
         try:
             # Get model name from output path and create model-based filename
             output_dir = Path(output_path)
             # Extract model name from the inferencer (need to get it from self.model)
-            model_safe_name = self.model.replace('/', '_').replace(':', '_')
+            model_safe_name = self.model.replace("/", "_").replace(":", "_")
             if self.enable_thinking:
                 model_safe_name += "-thinking"
             # Add variant suffix if provided (e.g., -piecearr, -fmt2)
@@ -541,9 +569,9 @@ class OpenrouterInferencer:
 
             # Write existing results to file (overwrite)
             results_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(results_file, 'w') as f:
+            with open(results_file, "w") as f:
                 for result in existing_results:
-                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
             print(f"\nSaved {len(existing_results)} existing complete results to {results_file}")
 
@@ -551,7 +579,7 @@ class OpenrouterInferencer:
             print(f"\nWarning: Failed to save existing results: {e}")
 
 
-def load_existing_results(results_file: Path) -> Dict[str, Dict[str, Any]]:
+def load_existing_results(results_file: Path) -> dict[str, dict[str, Any]]:
     """Load existing results and return as dict keyed by task_id."""
     if not results_file.exists():
         return {}
@@ -559,11 +587,11 @@ def load_existing_results(results_file: Path) -> Dict[str, Dict[str, Any]]:
     print(f"Loading existing results from {results_file}")
 
     existing_results = {}
-    with open(results_file, 'r') as f:
+    with open(results_file) as f:
         for line in f:
             if line.strip():
                 result = json.loads(line.strip())
-                task_id = result.get('task_id')
+                task_id = result.get("task_id")
                 if task_id:
                     existing_results[task_id] = result
 
@@ -571,7 +599,7 @@ def load_existing_results(results_file: Path) -> Dict[str, Dict[str, Any]]:
     return existing_results
 
 
-def re_evaluate_results(results: List[Dict[str, Any]], max_tokens: int) -> List[Dict[str, Any]]:
+def re_evaluate_results(results: list[dict[str, Any]], max_tokens: int) -> list[dict[str, Any]]:
     """Re-extract answers and re-evaluate existing results."""
     re_evaluated = []
 
@@ -580,54 +608,52 @@ def re_evaluate_results(results: List[Dict[str, Any]], max_tokens: int) -> List[
         new_result = dict(result)
 
         # Get the response from existing inference
-        response = result.get('inference', {}).get('response', '')
+        response = result.get("inference", {}).get("response", "")
 
         # Re-extract the answer using the updated extraction function
         extracted, extraction_successful = extract_answer(response)
 
         # Re-evaluate with the correct answer
-        answer_type = result.get('answer_type', 'single')
-        usage = result.get('inference', {}).get('usage', {})
+        answer_type = result.get("answer_type", "single")
+        usage = result.get("inference", {}).get("usage", {})
 
         correct, error_type = evaluate_answer_with_error_type(
-            extracted,
-            result['correct_answer'],
-            answer_type,
-            extraction_successful,
-            usage,
-            max_tokens
+            extracted, result["correct_answer"], answer_type, extraction_successful, usage, max_tokens
         )
 
         # Update the inference results
-        new_result['inference']['extracted'] = extracted
-        new_result['inference']['extraction_successful'] = extraction_successful
-        new_result['inference']['is_correct'] = correct
-        new_result['inference']['error_type'] = error_type
+        new_result["inference"]["extracted"] = extracted
+        new_result["inference"]["extraction_successful"] = extraction_successful
+        new_result["inference"]["is_correct"] = correct
+        new_result["inference"]["error_type"] = error_type
 
         re_evaluated.append(new_result)
 
     return re_evaluated
 
 
-def filter_incomplete_tasks(tasks: List[Dict[str, Any]], existing_results: Dict[str, Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def filter_incomplete_tasks(
+    tasks: list[dict[str, Any]], existing_results: dict[str, dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Filter tasks into incomplete (need inference) and complete (already done)."""
     incomplete_tasks = []
     complete_results = []
     max_token_retry_count = 0
 
     for task in tasks:
-        task_id = task.get('task_id')
+        task_id = task.get("task_id")
         if task_id in existing_results:
             existing_result = existing_results[task_id]
             # Check if inference was completed successfully
-            if ('inference' in existing_result and
-                'response' in existing_result['inference'] and
-                existing_result['inference']['response'] and
-                not existing_result['inference']['response'].startswith('ERROR')):
-
+            if (
+                "inference" in existing_result
+                and "response" in existing_result["inference"]
+                and existing_result["inference"]["response"]
+                and not existing_result["inference"]["response"].startswith("ERROR")
+            ):
                 # Check if this result had max_token_reached error - if so, retry it
-                error_type = existing_result['inference'].get('error_type', '')
-                if error_type == 'max_token_reached':
+                error_type = existing_result["inference"].get("error_type", "")
+                if error_type == "max_token_reached":
                     incomplete_tasks.append(task)
                     max_token_retry_count += 1
                 else:
@@ -654,7 +680,7 @@ def main():
         print("Running in EVAL-ONLY mode - re-evaluating existing results")
 
         # Get the results file path (include variant suffix to match the run)
-        model_safe_name = args.model.replace('/', '_').replace(':', '_')
+        model_safe_name = args.model.replace("/", "_").replace(":", "_")
         if args.enable_thinking:
             model_safe_name += "-thinking"
         model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group)
@@ -669,7 +695,7 @@ def main():
         # Load existing results
         print(f"Loading results from {results_file}")
         results = []
-        with open(results_file, 'r') as f:
+        with open(results_file) as f:
             for line in f:
                 if line.strip():
                     results.append(json.loads(line.strip()))
@@ -685,12 +711,12 @@ def main():
         tasks = load_tasks(args.dataset_root, args.max_tasks, args.N_samples_per_task)
 
         # Make sure task order is maintained
-        task_id_to_task = {task['task_id']: task for task in tasks}
-        task_id_to_result = {r['task_id']: r for r in results}
+        task_id_to_task = {task["task_id"]: task for task in tasks}
+        task_id_to_result = {r["task_id"]: r for r in results}
 
         # Ensure all task fields are present in results
         for result in results:
-            task_id = result['task_id']
+            task_id = result["task_id"]
             if task_id in task_id_to_task:
                 task = task_id_to_task[task_id]
                 # Update any missing fields from original task
@@ -700,9 +726,9 @@ def main():
 
         # Save the re-evaluated results back to the JSONL file
         print(f"Saving re-evaluated results to {results_file}")
-        with open(results_file, 'w') as f:
+        with open(results_file, "w") as f:
             for result in results:
-                f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
         # Use dummy timing for eval-only mode
         start_time = time.time()
@@ -728,7 +754,7 @@ def main():
         else:
             print("Checking for existing results to resume from...")
             # Check for existing results and filter incomplete tasks
-            model_safe_name = args.model.replace('/', '_').replace(':', '_')
+            model_safe_name = args.model.replace("/", "_").replace(":", "_")
             if args.enable_thinking:
                 model_safe_name += "-thinking"
             model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group)
@@ -757,16 +783,24 @@ def main():
             # For resume mode, save existing results first, then append new ones
             # For no-resume mode, just append new results
             save_existing_first = not args.no_resume and len(complete_results) > 0
-            new_results = inferencer.run_inference(incomplete_tasks, num_workers, args.use_format_example_group, str(args.output_dir), args.save_interval, complete_results, save_existing_first)
+            new_results = inferencer.run_inference(
+                incomplete_tasks,
+                num_workers,
+                args.use_format_example_group,
+                str(args.output_dir),
+                args.save_interval,
+                complete_results,
+                save_existing_first,
+            )
             end_time = time.time()
 
             # Combine complete and new results, maintaining original task order
             task_id_to_result = {}
             for result in complete_results + new_results:
-                task_id_to_result[result['task_id']] = result
+                task_id_to_result[result["task_id"]] = result
 
             # Maintain original task order
-            results = [task_id_to_result[task['task_id']] for task in tasks if task['task_id'] in task_id_to_result]
+            results = [task_id_to_result[task["task_id"]] for task in tasks if task["task_id"] in task_id_to_result]
         else:
             print("All tasks already completed!")
             start_time = time.time()
@@ -775,7 +809,7 @@ def main():
 
     # Calculate stats
     total = len(results)
-    correct = sum(r['inference']['is_correct'] for r in results)
+    correct = sum(r["inference"]["is_correct"] for r in results)
     accuracy = correct / total
 
     # Calculate usage statistics
@@ -784,7 +818,7 @@ def main():
     # Calculate error type distribution
     error_type_stats = {}
     for result in results:
-        error_type = result['inference'].get('error_type', 'unknown')
+        error_type = result["inference"].get("error_type", "unknown")
         if error_type not in error_type_stats:
             error_type_stats[error_type] = 0
         error_type_stats[error_type] += 1
@@ -799,49 +833,55 @@ def main():
     task_category_stats = {}
 
     for i, result in enumerate(results):
-        task_type = result['task_type']
+        task_type = result["task_type"]
         # Extract task_category from the original task
-        task_category = tasks[i].get('task_category', 'unknown')
-        usage = result.get('inference', {}).get('usage', {})
+        task_category = tasks[i].get("task_category", "unknown")
+        usage = result.get("inference", {}).get("usage", {})
 
         # Task type stats
         if task_type not in task_type_stats:
-            task_type_stats[task_type] = {'total': 0, 'correct': 0, 'cost': 0.0, 'tokens': 0, 'extraction_success': 0}
-        task_type_stats[task_type]['total'] += 1
-        task_type_stats[task_type]['cost'] += usage.get('cost', 0.0)
-        task_type_stats[task_type]['tokens'] += usage.get('total_tokens', 0)
-        if result['inference']['is_correct']:
-            task_type_stats[task_type]['correct'] += 1
-        if result['inference']['extraction_successful']:
-            task_type_stats[task_type]['extraction_success'] += 1
+            task_type_stats[task_type] = {"total": 0, "correct": 0, "cost": 0.0, "tokens": 0, "extraction_success": 0}
+        task_type_stats[task_type]["total"] += 1
+        task_type_stats[task_type]["cost"] += usage.get("cost", 0.0)
+        task_type_stats[task_type]["tokens"] += usage.get("total_tokens", 0)
+        if result["inference"]["is_correct"]:
+            task_type_stats[task_type]["correct"] += 1
+        if result["inference"]["extraction_successful"]:
+            task_type_stats[task_type]["extraction_success"] += 1
 
         # Task category stats
         if task_category not in task_category_stats:
-            task_category_stats[task_category] = {'total': 0, 'correct': 0, 'cost': 0.0, 'tokens': 0, 'extraction_success': 0}
-        task_category_stats[task_category]['total'] += 1
-        task_category_stats[task_category]['cost'] += usage.get('cost', 0.0)
-        task_category_stats[task_category]['tokens'] += usage.get('total_tokens', 0)
-        if result['inference']['is_correct']:
-            task_category_stats[task_category]['correct'] += 1
-        if result['inference']['extraction_successful']:
-            task_category_stats[task_category]['extraction_success'] += 1
+            task_category_stats[task_category] = {
+                "total": 0,
+                "correct": 0,
+                "cost": 0.0,
+                "tokens": 0,
+                "extraction_success": 0,
+            }
+        task_category_stats[task_category]["total"] += 1
+        task_category_stats[task_category]["cost"] += usage.get("cost", 0.0)
+        task_category_stats[task_category]["tokens"] += usage.get("total_tokens", 0)
+        if result["inference"]["is_correct"]:
+            task_category_stats[task_category]["correct"] += 1
+        if result["inference"]["extraction_successful"]:
+            task_category_stats[task_category]["extraction_success"] += 1
 
     # Add accuracy, cost, and extraction success calculations to task type stats
-    for task_type, stats in task_type_stats.items():
-        stats['accuracy'] = stats['correct'] / stats['total'] if stats['total'] > 0 else 0.0
-        stats['extraction_success_rate'] = stats['extraction_success'] / stats['total'] if stats['total'] > 0 else 0.0
-        stats['avg_cost'] = stats['cost'] / stats['total'] if stats['total'] > 0 else 0.0
-        stats['avg_tokens'] = stats['tokens'] / stats['total'] if stats['total'] > 0 else 0.0
+    for _task_type, stats in task_type_stats.items():
+        stats["accuracy"] = stats["correct"] / stats["total"] if stats["total"] > 0 else 0.0
+        stats["extraction_success_rate"] = stats["extraction_success"] / stats["total"] if stats["total"] > 0 else 0.0
+        stats["avg_cost"] = stats["cost"] / stats["total"] if stats["total"] > 0 else 0.0
+        stats["avg_tokens"] = stats["tokens"] / stats["total"] if stats["total"] > 0 else 0.0
 
     # Add accuracy, cost, and extraction success calculations to task category stats
-    for task_category, stats in task_category_stats.items():
-        stats['accuracy'] = stats['correct'] / stats['total'] if stats['total'] > 0 else 0.0
-        stats['extraction_success_rate'] = stats['extraction_success'] / stats['total'] if stats['total'] > 0 else 0.0
-        stats['avg_cost'] = stats['cost'] / stats['total'] if stats['total'] > 0 else 0.0
-        stats['avg_tokens'] = stats['tokens'] / stats['total'] if stats['total'] > 0 else 0.0
+    for _task_category, stats in task_category_stats.items():
+        stats["accuracy"] = stats["correct"] / stats["total"] if stats["total"] > 0 else 0.0
+        stats["extraction_success_rate"] = stats["extraction_success"] / stats["total"] if stats["total"] > 0 else 0.0
+        stats["avg_cost"] = stats["cost"] / stats["total"] if stats["total"] > 0 else 0.0
+        stats["avg_tokens"] = stats["tokens"] / stats["total"] if stats["total"] > 0 else 0.0
 
     # Create model-based filenames with variant suffix
-    model_safe_name = args.model.replace('/', '_').replace(':', '_')
+    model_safe_name = args.model.replace("/", "_").replace(":", "_")
     if args.enable_thinking:
         model_safe_name += "-thinking"
     model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group)
@@ -850,75 +890,88 @@ def main():
 
     # Save results as JSONL (one result per line)
     results_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(results_file, 'w') as f:
+    with open(results_file, "w") as f:
         for result in results:
-            f.write(json.dumps(result, ensure_ascii=False) + '\n')
+            f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
     # Also save a pretty-printed JSON version for readability
     pretty_file = args.output_dir / f"{model_safe_name}_pretty.json"
-    with open(pretty_file, 'w') as f:
+    with open(pretty_file, "w") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     print(f"PRETTY JSON SAVED: {pretty_file}")
 
     # Save stats as separate JSON file
-    with open(stats_file, 'w') as f:
-        json.dump({
-            'model': args.model,
-            'accuracy': accuracy,
-            'format_correct_rate': usage_stats['extraction_success_rate'],
-            'total': total,
-            'correct': correct,
-            'format_correct': usage_stats['extraction_success_count'],
-            'error_type_stats': error_type_stats,
-            'error_type_rates': error_type_rates,
-            'time': end_time - start_time,
-            'usage': usage_stats,
-            'task_type_stats': task_type_stats,
-            'task_category_stats': task_category_stats,
-            'metadata': {
-                'dataset_root': str(args.dataset_root),
-                'n_samples_per_task': args.N_samples_per_task,
-                'max_tasks': args.max_tasks,
-                'add_context': args.add_context,
-                'workers': num_workers,
-                'format_example_group': args.use_format_example_group,
-                'enable_thinking': args.enable_thinking
-            }
-        }, f, indent=2)
-
+    with open(stats_file, "w") as f:
+        json.dump(
+            {
+                "model": args.model,
+                "accuracy": accuracy,
+                "format_correct_rate": usage_stats["extraction_success_rate"],
+                "total": total,
+                "correct": correct,
+                "format_correct": usage_stats["extraction_success_count"],
+                "error_type_stats": error_type_stats,
+                "error_type_rates": error_type_rates,
+                "time": end_time - start_time,
+                "usage": usage_stats,
+                "task_type_stats": task_type_stats,
+                "task_category_stats": task_category_stats,
+                "metadata": {
+                    "dataset_root": str(args.dataset_root),
+                    "n_samples_per_task": args.N_samples_per_task,
+                    "max_tasks": args.max_tasks,
+                    "add_context": args.add_context,
+                    "workers": num_workers,
+                    "format_example_group": args.use_format_example_group,
+                    "enable_thinking": args.enable_thinking,
+                },
+            },
+            f,
+            indent=2,
+        )
 
     # Print per-task-category stats with cost and extraction success information
-    print(f"\nPER-TASK-CATEGORY PERFORMANCE:")
+    print("\nPER-TASK-CATEGORY PERFORMANCE:")
     print("-" * 120)
-    print(f"{'Category':30} {'Accuracy':>10} {'Format Rate':>12} {'Count':>12} {'Cost':>10} {'Avg Cost':>12} {'Tokens':>10}")
+    print(
+        f"{'Category':30} {'Accuracy':>10} {'Format Rate':>12} {'Count':>12} {'Cost':>10} {'Avg Cost':>12} {'Tokens':>10}"
+    )
     print("-" * 120)
     for task_category, stats in sorted(task_category_stats.items()):
-        category_accuracy = stats['correct'] / stats['total'] if stats['total'] > 0 else 0
-        extraction_rate = stats['extraction_success'] / stats['total'] if stats['total'] > 0 else 0
-        print(f"{task_category:30} {category_accuracy:10.3f} {extraction_rate:12.3f} {stats['correct']:>5}/{stats['total']:<5} "
-              f"${stats['cost']:>8.4f} ${stats['avg_cost']:>10.4f} {int(stats['tokens']):>10,}")
+        category_accuracy = stats["correct"] / stats["total"] if stats["total"] > 0 else 0
+        extraction_rate = stats["extraction_success"] / stats["total"] if stats["total"] > 0 else 0
+        print(
+            f"{task_category:30} {category_accuracy:10.3f} {extraction_rate:12.3f} {stats['correct']:>5}/{stats['total']:<5} "
+            f"${stats['cost']:>8.4f} ${stats['avg_cost']:>10.4f} {int(stats['tokens']):>10,}"
+        )
 
     # Print per-task-type stats with cost and extraction success information
-    print(f"\nPER-TASK-TYPE PERFORMANCE:")
+    print("\nPER-TASK-TYPE PERFORMANCE:")
     print("-" * 120)
-    print(f"{'Task Type':30} {'Accuracy':>10} {'Format Rate':>12} {'Count':>12} {'Cost':>10} {'Avg Cost':>12} {'Tokens':>10}")
+    print(
+        f"{'Task Type':30} {'Accuracy':>10} {'Format Rate':>12} {'Count':>12} {'Cost':>10} {'Avg Cost':>12} {'Tokens':>10}"
+    )
     print("-" * 120)
     for task_type, stats in sorted(task_type_stats.items()):
-        type_accuracy = stats['correct'] / stats['total'] if stats['total'] > 0 else 0
-        extraction_rate = stats['extraction_success'] / stats['total'] if stats['total'] > 0 else 0
-        print(f"{task_type:30} {type_accuracy:10.3f} {extraction_rate:12.3f} {stats['correct']:>5}/{stats['total']:<5} "
-              f"${stats['cost']:>8.4f} ${stats['avg_cost']:>10.4f} {int(stats['tokens']):>10,}")
+        type_accuracy = stats["correct"] / stats["total"] if stats["total"] > 0 else 0
+        extraction_rate = stats["extraction_success"] / stats["total"] if stats["total"] > 0 else 0
+        print(
+            f"{task_type:30} {type_accuracy:10.3f} {extraction_rate:12.3f} {stats['correct']:>5}/{stats['total']:<5} "
+            f"${stats['cost']:>8.4f} ${stats['avg_cost']:>10.4f} {int(stats['tokens']):>10,}"
+        )
 
     print(f"\nOVERALL ACCURACY: {accuracy:.3f} ({correct}/{total})")
-    print(f"FORMAT FOLLOWING RATE: {usage_stats['extraction_success_rate']:.3f} ({usage_stats['extraction_success_count']}/{total})")
+    print(
+        f"FORMAT FOLLOWING RATE: {usage_stats['extraction_success_rate']:.3f} ({usage_stats['extraction_success_count']}/{total})"
+    )
 
-    print(f"\nERROR TYPE BREAKDOWN:")
+    print("\nERROR TYPE BREAKDOWN:")
     for error_type, count in sorted(error_type_stats.items()):
         rate = error_type_rates[error_type]
         print(f"  {error_type}: {rate:.3f} ({count}/{total})")
 
     print(f"\nTIME: {end_time - start_time:.1f}s")
-    print(f"\nUSAGE STATISTICS:")
+    print("\nUSAGE STATISTICS:")
     print(f"Total Cost: ${usage_stats['total_cost']:.4f}")
     print(f"Average Cost per Task: ${usage_stats['avg_cost_per_task']:.4f}")
     print(f"Cost per Correct Answer: ${usage_stats['total_cost'] / correct if correct > 0 else 0:.4f}")
@@ -926,9 +979,13 @@ def main():
     print(f"  - Prompt Tokens: {usage_stats['total_prompt_tokens']:,}")
     print(f"  - Completion Tokens: {usage_stats['total_completion_tokens']:,}")
     print(f"Average Tokens per Task: {usage_stats['avg_tokens_per_task']:.1f}")
-    print(f"Cost per 1K Tokens: ${usage_stats['total_cost'] / (usage_stats['total_tokens'] / 1000) if usage_stats['total_tokens'] > 0 else 0:.4f}")
-    print(f"Tokens per Dollar: {usage_stats['total_tokens'] / usage_stats['total_cost'] if usage_stats['total_cost'] > 0 else 0:.0f}")
-    if usage_stats['error_count'] > 0:
+    print(
+        f"Cost per 1K Tokens: ${usage_stats['total_cost'] / (usage_stats['total_tokens'] / 1000) if usage_stats['total_tokens'] > 0 else 0:.4f}"
+    )
+    print(
+        f"Tokens per Dollar: {usage_stats['total_tokens'] / usage_stats['total_cost'] if usage_stats['total_cost'] > 0 else 0:.0f}"
+    )
+    if usage_stats["error_count"] > 0:
         print(f"API Errors: {usage_stats['error_count']}")
     print(f"\nRESULTS SAVED: {results_file}")
     print(f"PRETTY JSON SAVED: {pretty_file}")
@@ -942,8 +999,9 @@ def parse_arguments():
     default_dataset_root = script_dir.parent.parent / "data" / "benchmark"
     default_output_dir = script_dir.parent.parent / "results"
 
-    parser.add_argument('--dataset-root', type=Path, default=default_dataset_root,
-                       help='Root directory containing JSONL task files')
+    parser.add_argument(
+        "--dataset-root", type=Path, default=default_dataset_root, help="Root directory containing JSONL task files"
+    )
     # parser.add_argument('--model', type=str, required=True,
     #                    help='OpenRouter model ID, e.g., google/gemini-2.5-flash')
     # parser.add_argument('--model', type=str, default='mistralai/mistral-medium-3.1')
@@ -951,7 +1009,7 @@ def parse_arguments():
     # parser.add_argument('--model', type=str, default='google/gemini-2.5-flash')
     # parser.add_argument('--model', type=str, default='anthropic/claude-3.5-haiku')
     # parser.add_argument('--model', type=str, default='anthropic/claude-haiku-4.5')
-    parser.add_argument('--model', type=str, default='anthropic/claude-sonnet-4.5')
+    parser.add_argument("--model", type=str, default="anthropic/claude-sonnet-4.5")
     # parser.add_argument('--model', type=str, default='anthropic/claude-sonnet-4')
     # parser.add_argument('--model', type=str, default='deepseek/deepseek-chat-v3.1')
     # parser.add_argument('--model', type=str, default='deepseek/deepseek-r1-0528')
@@ -963,29 +1021,42 @@ def parse_arguments():
     # parser.add_argument('--model', type=str, default='meta-llama/llama-4-maverick')
     # parser.add_argument('--model', type=str, default='meta-llama/llama-4-scout')
     # parser.add_argument('--model', type=str, default='google/gemma-3-27b-it')
-    parser.add_argument('--output-dir', type=Path, default=default_output_dir,
-                       help='Directory to save results')
-    parser.add_argument('--max-tasks', type=int, default=None)
-    parser.add_argument('--N-samples-per-task', type=int, default=None,
-                       help='Number of samples to run per task type (default: None, use all)')
-    parser.add_argument('--add-context', action='store_true')
-    parser.add_argument('--workers', type=int, default=256,
-                       help='Number of parallel workers (default: 8, set to 1 for sequential)')
-    parser.add_argument('--save-interval', type=int, default=10,
-                       help='Save results every N tasks (default: 10)')
-    parser.add_argument('--max-retries', type=int, default=10,
-                       help='Maximum retry attempts for API calls (default: 5)')
-    parser.add_argument('--timeout', type=int, default=6000,
-                       help='Request timeout in seconds (default: 60)')
-    parser.add_argument('--max-tokens', type=int, default=4096*2)
-    parser.add_argument('--use-format-example-group', type=int, choices=[1, 2], default=1,
-                       help='Which format example group to use (1 or 2, default: 1)')
-    parser.add_argument('--no-resume', action='store_true',
-                       help='Start inference from scratch, ignore existing results (default: resume from existing)')
-    parser.add_argument('--enable-thinking', action='store_true',
-                       help='Enable reasoning/thinking mode for models that support it')
-    parser.add_argument('--eval-only', action='store_true',
-                       help='Re-evaluate existing results without running inference (regenerates stats and pretty JSON)')
+    parser.add_argument("--output-dir", type=Path, default=default_output_dir, help="Directory to save results")
+    parser.add_argument("--max-tasks", type=int, default=None)
+    parser.add_argument(
+        "--N-samples-per-task",
+        type=int,
+        default=None,
+        help="Number of samples to run per task type (default: None, use all)",
+    )
+    parser.add_argument("--add-context", action="store_true")
+    parser.add_argument(
+        "--workers", type=int, default=256, help="Number of parallel workers (default: 8, set to 1 for sequential)"
+    )
+    parser.add_argument("--save-interval", type=int, default=10, help="Save results every N tasks (default: 10)")
+    parser.add_argument("--max-retries", type=int, default=10, help="Maximum retry attempts for API calls (default: 5)")
+    parser.add_argument("--timeout", type=int, default=6000, help="Request timeout in seconds (default: 60)")
+    parser.add_argument("--max-tokens", type=int, default=4096 * 2)
+    parser.add_argument(
+        "--use-format-example-group",
+        type=int,
+        choices=[1, 2],
+        default=1,
+        help="Which format example group to use (1 or 2, default: 1)",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Start inference from scratch, ignore existing results (default: resume from existing)",
+    )
+    parser.add_argument(
+        "--enable-thinking", action="store_true", help="Enable reasoning/thinking mode for models that support it"
+    )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Re-evaluate existing results without running inference (regenerates stats and pretty JSON)",
+    )
 
     return parser.parse_args()
 

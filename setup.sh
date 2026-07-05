@@ -1,116 +1,110 @@
 #!/bin/bash
-
 # =============================================================================
-# ChessQA Setup Script
+# ChessQA Setup Script — creates a local venv and installs dependencies.
 # =============================================================================
 
-set -e
+set -euo pipefail
 
-echo "🏆 ChessQA - Setup"
-echo "=================="
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="${ROOT}/.venv"
+PYTHON="${PYTHON:-python3}"
+
+echo "ChessQA — Setup"
+echo "==============="
 echo
 
 # Python
-if ! command -v python >/dev/null 2>&1; then
-  echo "❌ Python is not installed. Please install Python 3.8+ first."
+if ! command -v "${PYTHON}" >/dev/null 2>&1; then
+  echo "Python 3.10+ is required. Install Python and re-run, or set PYTHON=/path/to/python3."
   exit 1
 fi
-echo "✅ Python found: $(python --version)"
+echo "Python: $("${PYTHON}" --version)"
 
-# Dependencies
-echo "📦 Installing Python dependencies..."
-if python -m pip install -r requirements.txt; then
-  echo "✅ Dependencies installed"
+# Virtual environment
+if [ ! -d "${VENV}" ]; then
+  echo "Creating virtual environment at .venv ..."
+  "${PYTHON}" -m venv "${VENV}"
 else
-  echo "❌ Failed to install dependencies"
-  exit 1
+  echo "Using existing virtual environment at .venv"
 fi
+
+PIP="${VENV}/bin/pip"
+PY="${VENV}/bin/python"
+
+echo "Upgrading pip ..."
+"${PIP}" install --upgrade pip
+
+echo "Installing core dependencies ..."
+"${PIP}" install -r "${ROOT}/requirements.txt"
+
+echo "Installing dev dependencies (ruff) ..."
+"${PIP}" install -r "${ROOT}/requirements-dev.txt"
 
 # API keys (OpenRouter)
 echo
-echo "🔑 API key setup (OpenRouter)"
+echo "API key setup (OpenRouter)"
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-  if [ -f "keys/openrouter.key" ]; then
-    export OPENROUTER_API_KEY="$(cat keys/openrouter.key)"
-    echo "✅ Loaded OPENROUTER_API_KEY from keys/openrouter.key"
+  if [ -f "${ROOT}/../keys/api_keys.json" ]; then
+    echo "Found ../keys/api_keys.json (used by eval/run_openrouter.py)"
+  elif [ -f "${ROOT}/keys/openrouter.key" ]; then
+    export OPENROUTER_API_KEY="$(cat "${ROOT}/keys/openrouter.key")"
+    echo "Loaded OPENROUTER_API_KEY from keys/openrouter.key"
   else
-    echo "⚠️  OPENROUTER_API_KEY not set. To enable cloud inference via OpenRouter:"
-    echo "   - Export key: export OPENROUTER_API_KEY=\"your_key\""
-    echo "   - Or save it to keys/openrouter.key"
-    echo "   Get a key: https://openrouter.ai/"
+    echo "OPENROUTER_API_KEY not set. For cloud inference:"
+    echo "  export OPENROUTER_API_KEY=\"your_key\""
+    echo "  or save to ../keys/api_keys.json (see CLAUDE.md)"
+    echo "  Get a key: https://openrouter.ai/"
   fi
 else
-  echo "✅ Detected OPENROUTER_API_KEY in environment"
+  echo "Detected OPENROUTER_API_KEY in environment"
 fi
 
 # Data files
 echo
-echo "📁 Checking for source data (under data/raw)..."
+echo "Checking for source data (data/raw/) ..."
 need_help=0
-if [ -f "data/raw/lichess_db_puzzle.csv" ]; then
-  echo "✅ lichess_db_puzzle.csv"
+for f in \
+  "data/raw/lichess_db_puzzle.csv" \
+  "data/raw/lichess_db_eval.jsonl.zst"
+do
+  if [ -f "${ROOT}/${f}" ]; then
+    echo "  ok  ${f}"
+  else
+    echo "  missing  ${f}"
+    need_help=1
+  fi
+done
+if [ -f "${ROOT}/data/raw/lichess_db_broadcast_2025-04.pgn" ]; then
+  echo "  ok  data/raw/lichess_db_broadcast_2025-04.pgn (optional)"
 else
-  echo "⚠️  Missing data/raw/lichess_db_puzzle.csv (Lichess puzzles)"
-  need_help=1
-fi
-if [ -f "data/raw/lichess_db_eval.jsonl.zst" ]; then
-  echo "✅ lichess_db_eval.jsonl.zst"
-else
-  echo "⚠️  Missing data/raw/lichess_db_eval.jsonl.zst (engine evals for Position Judgment)"
-  need_help=1
-fi
-if [ -f "data/raw/lichess_db_broadcast_2025-04.pgn" ]; then
-  echo "✅ lichess_db_broadcast_2025-04.pgn"
-else
-  echo "ℹ️  Optional: data/raw/lichess_db_broadcast_2025-04.pgn (state tracking)"
+  echo "  optional  data/raw/lichess_db_broadcast_2025-04.pgn (state tracking)"
 fi
 if [ "$need_help" -eq 1 ]; then
-  echo "   Download from https://database.lichess.org/ and place files under data/raw/"
+  echo "  Download from https://database.lichess.org/ and place under data/raw/"
 fi
 
-# Optional: vLLM (used by comment cleaning/judging helpers)
+# Optional extras
 echo
-echo "🚀 Optional dependency check (vLLM)"
-if python - <<'PY'
-try:
-  import vllm  # noqa: F401
-  print('yes')
-except Exception:
-  pass
+echo "Optional extras:"
+echo "  Semantic MCQ (05_semantic.py):  .venv/bin/pip install -r requirements-optional.txt"
+echo "  Offline vLLM pipeline (05_2/05_3):  .venv/bin/pip install torch vllm"
+
+# Verify core imports
+echo
+echo "Verifying core imports ..."
+"${PY}" - <<'PY'
+import chess, numpy, pandas, requests, tqdm, zstandard
+print("  core imports OK")
 PY
-then
-  echo "✅ vLLM installed (used by comment cleaning/judging helpers)"
-else
-  echo "ℹ️  vLLM not installed (optional). Install with: pip install vllm"
-fi
 
-# Next steps
 echo
-echo "🎯 Next steps"
-echo "-------------"
-echo "1) Generate datasets (writes to data/benchmark):"
-echo "   python code/dataset/01_structural.py --puzzle_path data/raw/lichess_db_puzzle.csv \\"
-echo "     --pgn_path data/raw/lichess_db_broadcast_2025-04.pgn --output_root data/benchmark --N_sample 100"
-echo "   python code/dataset/02_motifs.py --puzzle_path data/raw/lichess_db_puzzle.csv \\"
-echo "     --output_root data/benchmark --N_sample 100"
-echo "   python code/dataset/03_short_tactics.py --puzzle_path data/raw/lichess_db_puzzle.csv \\"
-echo "     --all_themes_path data/info/all_themes_to_include.json --output_root data/benchmark \\
-     --N_sample_rating 100 --N_sample_theme 25"
-echo "   python code/dataset/04_position_judgement.py --data_path data/raw/lichess_db_eval.jsonl.zst \\"
-echo "     --output_root data/benchmark --tasks_per_category 100 --max_evaluations 10000"
-echo "   python code/dataset/05_semantic.py --input data/mid/comment_dataset.final.json \\"
-echo "     --output_root data/benchmark --N_sample_mcq 100"
+echo "Next steps"
+echo "----------"
+echo "  source .venv/bin/activate"
+echo "  make lint          # run ruff"
 echo
-echo "2) Run inference (OpenRouter):"
-echo "   OPENROUTER_API_KEY=... python code/eval/run_openrouter.py \\"
-echo "     --dataset-root data/benchmark --model anthropic/claude-3.5-haiku \\"
-echo "     --output-dir results --workers 256"
+echo "  # Run inference against checked-in benchmark:"
+echo "  python eval/run_openrouter.py --dataset-root benchmark --model anthropic/claude-sonnet-4.5 \\"
+echo "    --output-dir results --workers 256 --max-tasks 5"
 echo
-echo "3) Browse and plot results:"
-echo "   python code/eval/browse_results.py --results-dir results"
-echo "   python code/plot/plot_overall_error_breakdown.py --results-dir results --output-dir plots"
-echo "   python code/plot/plot_2D.py --results-dir results --output-dir plots"
-echo "   python code/plot/export_comprehensive_stats.py --results-dir results --output comprehensive_stats.json"
-echo
-echo "📚 For details and background, see README.md"
-echo "✅ Setup completed"
+echo "Setup complete."

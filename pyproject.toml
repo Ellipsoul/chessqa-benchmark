@@ -1,0 +1,38 @@
+[project]
+name = "chessqa-benchmark"
+version = "0.1.0"
+description = "ChessQA benchmark — LLM chess understanding evaluation (CSSLab fork)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Runtime deps live in requirements.txt (pip/venv workflow).
+# Optional extras: requirements-optional.txt (semantic MCQ, offline vLLM pipeline).
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["dataset", "eval"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",  # line length — handled pragmatically via line-length above
+    "B008",  # argparse defaults in function signatures (common in CLI scripts)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Offline GPU pipeline scripts; heavy third-party imports and long prompts.
+"dataset/05_2_comment_cleaning.py" = ["E402", "F401"]
+"dataset/05_3_comment_judging.py" = ["E402", "F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dataset", "eval"]

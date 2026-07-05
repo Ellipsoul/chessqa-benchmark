@@ -1,0 +1,11 @@
+# Optional dependencies for dataset regeneration workflows not needed for eval.
+#
+# Semantic MCQ generation (05_semantic.py):
+#   pip install -r requirements-optional.txt
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4
+
+# Offline comment cleaning/judging (05_2, 05_3) — GPU-heavy, platform-specific:
+#   pip install torch vllm
+# torch>=2.0.0
+# vllm>=0.6.0

@@ -33,22 +33,23 @@ Usage example:
 """
 
 import argparse
+import gc
 import json
 import os
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
-
 import re
-import gc
 import time
+from pathlib import Path
+from typing import Any
 
 from vllm import LLM, SamplingParams
 
 
-def _setup_env(model_name: str,
-               enable_prefix_caching: bool = True,
-               attention_backend: str = None,
-               use_flashinfer: bool | None = False) -> None:
+def _setup_env(
+    model_name: str,
+    enable_prefix_caching: bool = True,
+    attention_backend: str = None,
+    use_flashinfer: bool | None = False,
+) -> None:
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -72,8 +73,8 @@ def _setup_env(model_name: str,
             os.environ.setdefault("VLLM_FLASHINFER_CACHE_DISABLED", "1")
 
 
-def load_comments(path: Path, max_records: int = 0) -> List[Dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
+def load_comments(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
         raise ValueError("Input file must be a JSON array of objects")
@@ -82,13 +83,13 @@ def load_comments(path: Path, max_records: int = 0) -> List[Dict[str, Any]]:
     return data
 
 
-def save_comments(path: Path, items: List[Dict[str, Any]]) -> None:
+def save_comments(path: Path, items: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
 
 
-def split_name(name: str) -> Tuple[str, str, List[str]]:
+def split_name(name: str) -> tuple[str, str, list[str]]:
     """Return (first, last, tokens) from a name like 'Steinitz, William' or 'Paul Morphy'."""
     if not name:
         return "", "", []
@@ -121,12 +122,7 @@ def normalize_weird_symbols(text: str) -> str:
         "\ue026": "R",  # ()
         "\ue027": "B",  # ()
         "\ue028": "N",  # ()
-        "\ue024": "K",  # ()
-        "": "Q",
-        "": "R",
-        "": "B",
-        "": "N",
-        "": "K",
+        "\ue024": "K",
     }
     out = text
     for k, v in rep.items():
@@ -134,7 +130,7 @@ def normalize_weird_symbols(text: str) -> str:
     # Remove zero-width and directional formatting chars
     out = re.sub(r"[\u200B-\u200F\u202A-\u202E]", "", out)
     # Normalize NBSP to space
-    out = out.replace("\u00A0", " ")
+    out = out.replace("\u00a0", " ")
     return out
 
 
@@ -184,7 +180,7 @@ def _normalize_name_for_eq(name: str) -> str:
     return re.sub(r"[^a-z]", "", (name or "").lower())
 
 
-def _annotator_side(item: Dict[str, Any]) -> str | None:
+def _annotator_side(item: dict[str, Any]) -> str | None:
     """Return 'White' or 'Black' if the annotator matches exactly that player; else None."""
     meta = item.get("meta", {}) or {}
     annot = meta.get("Annotator") or item.get("annotator") or ""
@@ -198,7 +194,7 @@ def _annotator_side(item: Dict[str, Any]) -> str | None:
     return None
 
 
-def build_messages(item: Dict[str, Any]) -> List[Dict[str, str]]:
+def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
     comment = item.get("comment", "").strip()
     comment = normalize_weird_symbols(comment)
     comment = strip_pgn_markup(comment)
@@ -209,8 +205,8 @@ def build_messages(item: Dict[str, Any]) -> List[Dict[str, str]]:
     b_first, b_last, b_tokens = split_name(black)
 
     # Provide explicit tokens to help the model match partial mentions
-    w_aliases = sorted({t for t in [white, w_first, w_last] + w_tokens if t}, key=lambda s: (-len(s), s.lower()))
-    b_aliases = sorted({t for t in [black, b_first, b_last] + b_tokens if t}, key=lambda s: (-len(s), s.lower()))
+    sorted({t for t in [white, w_first, w_last] + w_tokens if t}, key=lambda s: (-len(s), s.lower()))
+    sorted({t for t in [black, b_first, b_last] + b_tokens if t}, key=lambda s: (-len(s), s.lower()))
 
     sys = (
         "You are a precise data cleaner for chess commentary. "
@@ -249,7 +245,7 @@ def build_messages(item: Dict[str, Any]) -> List[Dict[str, str]]:
         "Black: Aronian, Levon\n"
         "Output strictly one line: cleaned text or SKIP."
     )
-        
+
     usr = (
         f"Comment: {comment}\n"
         f"White player (full): {white}\n"
@@ -264,7 +260,10 @@ def build_messages(item: Dict[str, Any]) -> List[Dict[str, str]]:
         {"role": "user", "content": few_shot_example_1},
         {"role": "assistant", "content": "SKIP"},
         {"role": "user", "content": few_shot_example_2},
-        {"role": "assistant", "content": "A huge blunder by Black which loses instantly. I think he missed that the c8-bishop is unprotected."},
+        {
+            "role": "assistant",
+            "content": "A huge blunder by Black which loses instantly. I think he missed that the c8-bishop is unprotected.",
+        },
         {"role": "user", "content": usr},
     ]
 
@@ -302,33 +301,30 @@ def sanitize_llm_output(text: str) -> str:
     # Prefer the last quoted segment among all text
     quoted = re.findall(r'"([^"\n]+)"', t)
     candidate = None
-    if quoted:
-        candidate = quoted[-1].strip()
-    else:
-        candidate = lines[-1]
+    candidate = quoted[-1].strip() if quoted else lines[-1]
 
     # Remove leading labels like 'Cleaned:', 'Output:', etc.
-    candidate = re.sub(r"^(Cleaned|Output|Result|Answer|Text|Comment)\s*[:：]\s*",
-                       "", candidate, flags=re.I)
+    candidate = re.sub(r"^(Cleaned|Output|Result|Answer|Text|Comment)\s*[:：]\s*", "", candidate, flags=re.I)
 
     # Collapse internal whitespace to one space
     candidate = re.sub(r"\s+", " ", candidate).strip()
 
     # Remove enclosing quotes if present
     if (candidate.startswith('"') and candidate.endswith('"')) or (
-        candidate.startswith("'") and candidate.endswith("'")):
+        candidate.startswith("'") and candidate.endswith("'")
+    ):
         candidate = candidate[1:-1].strip()
 
     return candidate if candidate else "SKIP"
 
 
-def _sorted_aliases(name: str) -> List[str]:
-    f, l, toks = split_name(name)
-    aliases = sorted({t for t in [name, f, l] + toks if t}, key=lambda s: (-len(s), s.lower()))
+def _sorted_aliases(name: str) -> list[str]:
+    first, last, toks = split_name(name)
+    aliases = sorted({t for t in [name, first, last] + toks if t}, key=lambda s: (-len(s), s.lower()))
     return aliases
 
 
-def apply_alias_replacements(text: str, aliases: List[str], replacement: str) -> str:
+def apply_alias_replacements(text: str, aliases: list[str], replacement: str) -> str:
     out = text
     for alias in aliases:
         # Word-ish boundaries: do not match inside larger alpha sequences
@@ -363,25 +359,35 @@ def apply_pronoun_replacements(text: str, side: str) -> str:
     return out
 
 
-def perform_cleaning(records: List[Dict[str, Any]], model: str, batch_size: int, max_model_len: int,
-                     max_tokens: int, tensor_parallel_size: int, gpu_mem_util: float,
-                     dtype: str = None, attention_backend: str = None,
-                     use_flashinfer: bool | None = False,
-                     enable_thinking: bool | None = True) -> List[Tuple[Dict[str, Any], str]]:
+def perform_cleaning(
+    records: list[dict[str, Any]],
+    model: str,
+    batch_size: int,
+    max_model_len: int,
+    max_tokens: int,
+    tensor_parallel_size: int,
+    gpu_mem_util: float,
+    dtype: str = None,
+    attention_backend: str = None,
+    use_flashinfer: bool | None = False,
+    enable_thinking: bool | None = True,
+) -> list[tuple[dict[str, Any], str]]:
     """Return list of tuples: (record, cleaned_text_or_SKIP)."""
-    _setup_env(model_name=model, enable_prefix_caching=True, attention_backend=attention_backend,
-               use_flashinfer=use_flashinfer)
+    _setup_env(
+        model_name=model, enable_prefix_caching=True, attention_backend=attention_backend, use_flashinfer=use_flashinfer
+    )
 
     # Free CUDA caches before loading
     try:
         import torch
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
         pass
     gc.collect()
 
-    llm_kwargs: Dict[str, Any] = {
+    llm_kwargs: dict[str, Any] = {
         "model": model,
         "max_model_len": int(max_model_len),
         "tensor_parallel_size": int(tensor_parallel_size),
@@ -398,12 +404,12 @@ def perform_cleaning(records: List[Dict[str, Any]], model: str, batch_size: int,
 
     sampling = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=int(max_tokens))
 
-    outputs: List[Tuple[Dict[str, Any], str]] = []
+    outputs: list[tuple[dict[str, Any], str]] = []
     t0 = time.time()
     for i in range(0, len(records), batch_size):
-        batch = records[i:i + batch_size]
+        batch = records[i : i + batch_size]
         prompts = [build_messages(r) for r in batch]
-        chat_kwargs: Dict[str, Any] = {}
+        chat_kwargs: dict[str, Any] = {}
         if enable_thinking is not None:
             chat_kwargs["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
         try:
@@ -411,7 +417,7 @@ def perform_cleaning(records: List[Dict[str, Any]], model: str, batch_size: int,
         except Exception:
             # Fallback without template kwargs (for models that don't accept it)
             outs = llm.chat(prompts, sampling)
-        for rec, out in zip(batch, outs):
+        for rec, out in zip(batch, outs, strict=False):
             text = out.outputs[0].text if out.outputs and out.outputs[0] else ""
             cleaned = sanitize_llm_output(text)
             # Post-ensure player substitutions, in case the LLM missed any exact alias surface forms
@@ -440,15 +446,22 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Offline vLLM cleaning for chess comments")
     ap.add_argument("--input", type=Path, default=default_input, help="Input JSON array file of comment objects")
     ap.add_argument("--output", type=Path, default=default_output, help="Output JSON file for cleaned comments")
-    ap.add_argument("--model", type=str, default="Qwen/Qwen3-30B-A3B-Instruct-2507", help="HuggingFace model ID or local path for vLLM")
+    ap.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-30B-A3B-Instruct-2507",
+        help="HuggingFace model ID or local path for vLLM",
+    )
     ap.add_argument("--batch-size", type=int, default=1024)
     ap.add_argument("--max-records", type=int, default=0, help="Limit records for a quick run (0 = all)")
     ap.add_argument("--max-model-len", type=int, default=8192)
     ap.add_argument("--max-tokens", type=int, default=128, help="Max new tokens for cleaning output")
     ap.add_argument("--tensor-parallel-size", type=int, default=2)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.80)
-    ap.add_argument("--dtype", type=str, default=None, choices=[None, "auto", "float16", "bfloat16", "float32"], nargs='?')
-    ap.add_argument("--attention-backend", type=str, default=None, choices=[None, "FLASH_ATTN", "XFORMERS"], nargs='?')
+    ap.add_argument(
+        "--dtype", type=str, default=None, choices=[None, "auto", "float16", "bfloat16", "float32"], nargs="?"
+    )
+    ap.add_argument("--attention-backend", type=str, default=None, choices=[None, "FLASH_ATTN", "XFORMERS"], nargs="?")
     gfi = ap.add_mutually_exclusive_group()
     gfi.add_argument("--use-flashinfer", dest="use_flashinfer", action="store_true")
     gfi.add_argument("--no-flashinfer", dest="use_flashinfer", action="store_false")
@@ -476,7 +489,7 @@ def main() -> int:
         enable_thinking=args.enable_thinking,
     )
 
-    cleaned_items: List[Dict[str, Any]] = []
+    cleaned_items: list[dict[str, Any]] = []
     skipped = 0
     for rec, out_text in pairs:
         if out_text.strip().upper() == "SKIP":

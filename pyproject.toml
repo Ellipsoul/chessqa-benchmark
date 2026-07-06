@@ -25,14 +25,12 @@ select = [
     "SIM", # flake8-simplify
 ]
 ignore = [
-    "E501",  # line length — handled pragmatically via line-length above
+    # All E501 hits (43 as of 2026-07) are string literals: prompt templates, piece-arrangement
+    # examples, and report format-strings. Splitting prompt strings would change model inputs and
+    # break reproduction of the paper's runs, so long lines are allowed; code lines fit in 120.
+    "E501",
     "B008",  # argparse defaults in function signatures (common in CLI scripts)
 ]
-
-[tool.ruff.lint.per-file-ignores]
-# Offline GPU pipeline scripts; heavy third-party imports and long prompts.
-"dataset/05_2_comment_cleaning.py" = ["E402", "F401"]
-"dataset/05_3_comment_judging.py" = ["E402", "F401"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["dataset", "eval"]

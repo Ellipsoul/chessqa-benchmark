@@ -1,3 +1,30 @@
+"""Generator for the Structural category (benchmark/structural.jsonl).
+
+Structural is the lowest rung of the paper's abstraction ladder: pure board-state and
+rules-of-the-game questions with mechanically derivable answers (no chess judgment needed).
+It is also the easiest category empirically (GPT-5* reaches ~97%).
+
+Eleven task types from two sources:
+
+From Lichess puzzle positions (one task per unique puzzle, first generator that fires wins):
+- piece_arrangement: list every piece and its square from the FEN.
+- legal_move_piece / legal_move_all: enumerate legal moves for one piece / the whole position.
+- check_detection: name the piece(s) giving check (only fires on in-check positions).
+- check_in_1: find all moves that deliver check.
+- capture_squares / control_squares / protect_squares: attack-map questions about a randomly
+  chosen non-pawn, non-king piece (pinned pieces are treated as unable to act).
+
+From broadcast PGN games (state tracking, the paper's board-simulation probe):
+- state_tracking_{short,mid,long}: given a FEN and 1-5 / 6-10 / 11-15 UCI moves, output the
+  exact resulting FEN.
+
+Ground truth is computed with python-chess, so answers are exact by construction.
+
+Usage:
+    python dataset/01_structural.py --puzzle_path data/raw/lichess_db_puzzle.csv \
+        --pgn_path data/raw/lichess_db_broadcast_2025-04.pgn --output_root data/benchmark --N_sample 100
+"""
+
 import argparse
 import random
 from collections.abc import Iterator
@@ -24,11 +51,12 @@ from utils import (
 
 
 def detect_piece_arrangement(board: chess.Board) -> str:
-    """Return the full piece arrangement of the board."""
+    """Return the full piece arrangement of the board (ground truth for piece_arrangement tasks)."""
     return get_piece_arrangement(board.fen())
 
 
 def detect_legal_moves_piece(board: chess.Board, target_square: str) -> list[str]:
+    """Return the UCI legal moves for the piece on ``target_square`` (empty list if none)."""
     legal_moves_per_square = {}
 
     for move in board.legal_moves:
@@ -41,6 +69,10 @@ def detect_legal_moves_piece(board: chess.Board, target_square: str) -> list[str
 
 
 def detect_check_detection(board: chess.Board) -> list[str]:
+    """Return each piece checking the side to move, as ``"<Color> <Type> at <square>"`` strings.
+
+    Empty list means the position is not a check (the calling generator then skips it).
+    """
     if not board.is_check():
         return []
 
@@ -62,6 +94,7 @@ def detect_check_detection(board: chess.Board) -> list[str]:
 
 
 def detect_check_in_1(board: chess.Board) -> list[str]:
+    """Return every legal move that gives check, found by push-and-test on a board copy."""
     checking_moves = []
 
     for move in board.legal_moves:
@@ -74,7 +107,17 @@ def detect_check_in_1(board: chess.Board) -> list[str]:
 
 
 def is_pinned(board: chess.Board, piece_square: int) -> bool:
-    """Check if a piece is pinned to its king."""
+    """Check if a piece is absolutely pinned to its own king.
+
+    Upstream's hand-rolled pin test (note: python-chess offers ``board.is_pinned``, but this
+    benchmark's ground truth was generated with this implementation, so it must stay as-is
+    for reproduction). The logic: the piece must lie strictly between its king and an enemy
+    slider on a shared rank/file (rook/queen) or diagonal (bishop/queen), with no other piece
+    standing between the slider and the king.
+
+    Used by the capture/control/protect generators, whose prompts tell the model to treat a
+    pinned piece as unable to move at all.
+    """
     piece = board.piece_at(piece_square)
     if piece is None:
         return False
@@ -83,7 +126,8 @@ def is_pinned(board: chess.Board, piece_square: int) -> bool:
     if king_square is None:
         return False
 
-    # Check if piece is on same rank, file, or diagonal as king
+    # between() is empty when the squares share no rank/file/diagonal (and also when they are
+    # adjacent — an adjacent piece can still be pinned, a known quirk of this implementation).
     attacks_between = chess.SquareSet.between(piece_square, king_square)
     if not attacks_between:
         # Piece not aligned with king
@@ -92,10 +136,12 @@ def is_pinned(board: chess.Board, piece_square: int) -> bool:
     # Include the piece square itself in the line
     attacks_between.add(piece_square)
 
-    # Check if there's a sliding piece (rook, bishop, queen) attacking along this line
+    # A pin requires an enemy slider whose line to the king passes through the piece.
     enemy_color = not piece.color
 
-    # Check for rook/queen attacks on ranks and files
+    # Orthogonal pins: rook/queen when piece and king share a rank or file. The subset test
+    # (attacker->king line contains the piece->king line) confirms the attacker sits on the
+    # far side of the piece along the same line.
     if chess.square_rank(piece_square) == chess.square_rank(king_square) or chess.square_file(
         piece_square
     ) == chess.square_file(king_square):
@@ -104,10 +150,10 @@ def is_pinned(board: chess.Board, piece_square: int) -> bool:
                 # Check if there are no other pieces between attacker and king
                 between_squares = chess.SquareSet.between(attacker_square, king_square)
                 between_squares.discard(piece_square)
-                if all(board.piece_at(sq) is None for sq in between_squares):
+                if all(board.piece_at(between_square) is None for between_square in between_squares):
                     return True
 
-    # Check for bishop/queen attacks on diagonals
+    # Diagonal pins: bishop/queen when piece and king share a diagonal (equal rank/file deltas).
     if abs(chess.square_rank(piece_square) - chess.square_rank(king_square)) == abs(
         chess.square_file(piece_square) - chess.square_file(king_square)
     ):
@@ -116,13 +162,18 @@ def is_pinned(board: chess.Board, piece_square: int) -> bool:
                 # Check if there are no other pieces between attacker and king
                 between_squares = chess.SquareSet.between(attacker_square, king_square)
                 between_squares.discard(piece_square)
-                if all(board.piece_at(sq) is None for sq in between_squares):
+                if all(board.piece_at(between_square) is None for between_square in between_squares):
                     return True
 
     return False
 
 
 def detect_capture_squares(board: chess.Board, target_square: str) -> list[str]:
+    """Return squares holding enemy pieces that the piece on ``target_square`` attacks.
+
+    Note this uses ``board.attacks`` (raw attack map), not legal-move generation: side to move
+    and discovered checks are irrelevant, only the pin veto below restricts the piece.
+    """
     square_index = chess.parse_square(target_square)
     piece = board.piece_at(square_index)
 
@@ -146,6 +197,7 @@ def detect_capture_squares(board: chess.Board, target_square: str) -> list[str]:
 
 
 def detect_control_squares(board: chess.Board, target_square: str) -> list[str]:
+    """Return *empty* squares attacked by the piece on ``target_square`` (its 'control'), pin-vetoed."""
     square_index = chess.parse_square(target_square)
     piece = board.piece_at(square_index)
 
@@ -168,6 +220,11 @@ def detect_control_squares(board: chess.Board, target_square: str) -> list[str]:
 
 
 def detect_protect_squares(board: chess.Board, target_square: str) -> list[str]:
+    """Return squares of *friendly* pieces defended by the piece on ``target_square``, pin-vetoed.
+
+    The king is excluded from the answer: a king can never actually be recaptured, so
+    "protecting" it is not meaningful under the task's definition.
+    """
     square_index = chess.parse_square(target_square)
     piece = board.piece_at(square_index)
 
@@ -198,9 +255,17 @@ def detect_legal_move_all(board: chess.Board) -> list[str]:
     return legal_moves
 
 
+# --- Task generators -------------------------------------------------------------------------
+# One function per task type. Shared signature (board, found_counter, puzzle_id) so
+# find_structural_tasks can drive them from a dispatch table; each returns a populated
+# ChessQuestionAnsweringTask, or None when the position doesn't support the task (e.g. no
+# check present), letting the driver fall through to the next generator.
+
+
 def generate_piece_arrangement_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask:
+    """Build a 'list every piece and its square' task; answer via get_piece_arrangement."""
     correct_answer = detect_piece_arrangement(board)
 
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
@@ -227,6 +292,8 @@ def generate_piece_arrangement_task(
 def generate_legal_move_piece_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask | None:
+    """Build a 'legal moves for one piece' task, with the piece drawn from movable pieces only."""
+    # Group legal moves by origin square so the random target is guaranteed a non-empty answer.
     legal_moves_per_square = {}
 
     for move in board.legal_moves:
@@ -270,6 +337,7 @@ def generate_legal_move_piece_task(
 def generate_legal_move_all_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask | None:
+    """Build an 'enumerate every legal move' task."""
     legal_moves = detect_legal_move_all(board)
 
     if not legal_moves:
@@ -299,6 +367,7 @@ def generate_legal_move_all_task(
 def generate_check_detection_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask | None:
+    """Build a 'which piece gives check' task; returns None unless the position is a check."""
     checking_pieces = detect_check_detection(board)
     if not checking_pieces:
         return None
@@ -327,6 +396,7 @@ def generate_check_detection_task(
 def generate_check_in_1_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask | None:
+    """Build a 'find all checking moves' task; returns None if no move gives check."""
     checking_moves = detect_check_in_1(board)
     if not checking_moves:
         return None
@@ -355,8 +425,18 @@ def generate_check_in_1_task(
 def generate_capture_squares_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask | None:
-    occupied_squares = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
-    occupied_squares = [sq for sq in occupied_squares if board.piece_at(sq).piece_type not in [chess.PAWN, chess.KING]]
+    """Build a 'which enemy pieces can this piece capture' task for a random non-pawn/king piece.
+
+    The trailing assert is load-bearing: when the chosen piece has no captures, the raised
+    AssertionError is swallowed by find_structural_tasks' try/except, skipping the position
+    rather than emitting a task with an empty answer. Same pattern in the control/protect
+    generators below.
+    """
+    # Candidate pieces: anything except pawns and kings (their attack patterns are too trivial).
+    occupied_squares = [square for square in chess.SQUARES if board.piece_at(square) is not None]
+    occupied_squares = [
+        square for square in occupied_squares if board.piece_at(square).piece_type not in [chess.PAWN, chess.KING]
+    ]
 
     if not occupied_squares:
         return None
@@ -370,8 +450,6 @@ def generate_capture_squares_task(
     piece_name = get_piece_name(piece)
 
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
-    # task_description = f"Find all squares that the {piece_name} on {target_square} can capture (reachable squares that have opponent pieces)."
-    # task_description += " Exclude captures if the piece is pinned to its king.\n"
     task_description = f"Find all squares that the {piece_name} on {target_square} can capture (i.e. every square that has an opponent piece such that the {piece_name} on {target_square} could legally move to that square and capture the piece).\n"
     task_description += (
         f"Exclude captures if the {piece_name} on {target_square} is pinned to its king and thus cannot move.\n"
@@ -402,8 +480,11 @@ def generate_capture_squares_task(
 def generate_control_squares_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask | None:
-    occupied_squares = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
-    occupied_squares = [sq for sq in occupied_squares if board.piece_at(sq).piece_type not in [chess.PAWN, chess.KING]]
+    """Build a 'which empty squares does this piece control' task (see capture task for the assert pattern)."""
+    occupied_squares = [square for square in chess.SQUARES if board.piece_at(square) is not None]
+    occupied_squares = [
+        square for square in occupied_squares if board.piece_at(square).piece_type not in [chess.PAWN, chess.KING]
+    ]
 
     if not occupied_squares:
         return None
@@ -417,8 +498,6 @@ def generate_control_squares_task(
     piece_name = get_piece_name(piece)
 
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
-    # task_description = f"Find all squares that the {piece_name} on {target_square} controls (reachable empty squares)."
-    # task_description += " Exclude control if the piece is pinned to its king.\n"
     task_description = f"Find all squares that the {piece_name} on {target_square} controls (i.e. every empty square that the {piece_name} on {target_square} could legally move to, excluding squares occupied by any piece).\n"
     task_description += (
         f"Exclude control if the {piece_name} on {target_square} is pinned to its king and thus cannot move.\n"
@@ -449,8 +528,11 @@ def generate_control_squares_task(
 def generate_protect_squares_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask | None:
-    occupied_squares = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
-    occupied_squares = [sq for sq in occupied_squares if board.piece_at(sq).piece_type not in [chess.PAWN, chess.KING]]
+    """Build a 'which friendly pieces does this piece protect' task (see capture task for the assert pattern)."""
+    occupied_squares = [square for square in chess.SQUARES if board.piece_at(square) is not None]
+    occupied_squares = [
+        square for square in occupied_squares if board.piece_at(square).piece_type not in [chess.PAWN, chess.KING]
+    ]
 
     if not occupied_squares:
         return None
@@ -463,6 +545,7 @@ def generate_protect_squares_task(
 
     piece_name = get_piece_name(piece)
 
+    # Example of the fully assembled prompt this generator produces (after construct_prompt):
     # You are given a chess position in FEN: r4r2/pb2ppkp/1p4p1/2pq4/8/1P1P4/P1PN1PPP/R2Q1RK1 w - - 0 15.
     # CONTEXT_PLACEHOLDERFind all squares that contain pieces that the Black Queen on d5 protects (i.e. every square that contains a piece such that the Black Queen on d5 could legally recapture if an enemy piece captured it, excluding the king since it can't be captured).
     # Exclude protection if Black Queen on d5 is pinned to its king and thus cannot move.
@@ -500,6 +583,7 @@ def generate_protect_squares_task(
 
 
 def read_pgn_games(pgn_path: str) -> Iterator[chess.pgn.Game]:
+    """Lazily yield games from a (large) PGN file — used for state-tracking tasks."""
     with open(pgn_path, encoding="utf-8") as pgn_file:
         while True:
             game = chess.pgn.read_game(pgn_file)
@@ -509,6 +593,12 @@ def read_pgn_games(pgn_path: str) -> Iterator[chess.pgn.Game]:
 
 
 def extract_game_fragment(game: chess.pgn.Game, start_after_moves: int, track_moves: int) -> tuple[str, list[str], str]:
+    """Slice a game into (start FEN, next ``track_moves`` UCI moves, game id) for state tracking.
+
+    Plays the mainline up to ``start_after_moves`` plies (30 in practice — middlegame depth,
+    so positions are non-trivial), then takes the following ``track_moves`` plies as the move
+    sequence the model must apply. Returns ``(None, None, None)`` if the game is too short.
+    """
     game.board()
     all_moves = []
     node = game
@@ -536,12 +626,13 @@ def extract_game_fragment(game: chess.pgn.Game, start_after_moves: int, track_mo
 
 
 def _apply_uci_moves(start_fen: str, moves_uci: list[str]) -> tuple[str, list[str]]:
+    """Apply UCI moves to a FEN; return the final FEN (the ground truth) and the SAN transcript (metadata)."""
     board = chess.Board(start_fen)
     san_list = []
-    for u in moves_uci:
-        mv = chess.Move.from_uci(u)
-        san_list.append(board.san(mv))
-        board.push(mv)
+    for uci_move in moves_uci:
+        move = chess.Move.from_uci(uci_move)
+        san_list.append(board.san(move))
+        board.push(move)
     return board.fen(), san_list
 
 
@@ -552,6 +643,13 @@ def generate_fen_after_moves_task(
     task_subtype: str,
     found_counter: dict,
 ) -> ChessQuestionAnsweringTask:
+    """Build a state-tracking task: given start FEN + UCI moves, the exact resulting FEN.
+
+    Two schema quirks vs. the puzzle-based tasks: ``input`` is ``"FEN | uci moves"`` (consumers
+    must strip after ``|`` before parsing the FEN), and CONTEXT_PLACEHOLDER is stripped here —
+    injecting the *start* position's piece arrangement would leak nothing useful and the task
+    is about simulation, not perception.
+    """
     final_fen, san_list = _apply_uci_moves(start_fen, moves)
     moves_str = " ".join(moves)
     prefix = "Given an initial FEN and a sequence of UCI moves, apply the moves in order and output the exact resulting FEN.\n"
@@ -575,7 +673,21 @@ def generate_fen_after_moves_task(
     )
 
 
-def find_structural_tasks(unique_positions, data, cfg):
+def find_structural_tasks(unique_positions, data, config):
+    """Drive all eleven generators until each has config.N_sample tasks.
+
+    Puzzle phase: for each (shuffled) puzzle position, try the eight puzzle-based generators
+    in dict order and keep at most one task per position — the ``break`` after a hit plus the
+    ``unique_positions`` guard prevent near-duplicate positions appearing across task types.
+    A bare ``except Exception: continue`` deliberately swallows generator failures (bad FENs,
+    empty-answer asserts) and just moves on; sampling is with-replacement from ~5M puzzles,
+    so discarding positions is free.
+
+    PGN phase: streams broadcast games, taking at most one state-tracking fragment per game
+    with a randomly drawn track length per bucket (short 1-5, mid 6-10, long 11-15 plies).
+
+    Returns the combined task list (order: puzzle tasks, then state tracking).
+    """
     found_counter = {
         "structural_piece_arrangement": 0,
         "structural_legal_move_piece": 0,
@@ -611,7 +723,7 @@ def find_structural_tasks(unique_positions, data, cfg):
         board = chess.Board(fen)
 
         for task_type, task_generator in task_generators.items():
-            if found_counter[task_type] >= cfg.N_sample:
+            if found_counter[task_type] >= config.N_sample:
                 continue
 
             try:
@@ -625,22 +737,22 @@ def find_structural_tasks(unique_positions, data, cfg):
             except Exception:
                 continue
 
-        if all(found_counter[t] >= cfg.N_sample for t in list(task_generators.keys())):
+        if all(found_counter[task_name] >= config.N_sample for task_name in list(task_generators.keys())):
             break
 
     # State tracking subtasks: short (1-5), mid (6-10), long (11-15) moves
     state_tracking_configs = [("short", 1, 5), ("mid", 6, 10), ("long", 11, 15)]
 
-    for game in read_pgn_games(cfg.pgn_path):
+    for game in read_pgn_games(config.pgn_path):
         # Check if all state tracking subtasks are complete
         if all(
-            found_counter[f"structural_state_tracking_{subtype}"] >= cfg.N_sample
+            found_counter[f"structural_state_tracking_{subtype}"] >= config.N_sample
             for subtype, _, _ in state_tracking_configs
         ):
             break
 
         for subtype, min_moves, max_moves in state_tracking_configs:
-            if found_counter[f"structural_state_tracking_{subtype}"] >= cfg.N_sample:
+            if found_counter[f"structural_state_tracking_{subtype}"] >= config.N_sample:
                 continue
 
             # Try different track lengths within the range
@@ -660,6 +772,7 @@ def find_structural_tasks(unique_positions, data, cfg):
 
 
 def parse_args():
+    """Parse CLI flags. Defaults use the upstream repo layout — pass explicit paths in this repo."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--puzzle_path", type=str, default="../../data/raw/lichess_db_puzzle.csv")
     parser.add_argument(
@@ -676,15 +789,16 @@ def parse_args():
 
 
 def main():
-    cfg = parse_args()
-    seed_everything(cfg.seed)
+    """Generate the Structural benchmark file: seed, load puzzles, run generators, write JSONL."""
+    config = parse_args()
+    seed_everything(config.seed)
 
-    data = read_puzzles(cfg.puzzle_path)
+    data = read_puzzles(config.puzzle_path)
     unique_positions = set()
-    all_found = find_structural_tasks(unique_positions, data, cfg)
+    all_found = find_structural_tasks(unique_positions, data, config)
     print(f"Found {len(all_found)} total tasks")
 
-    save_tasks(all_found, "structural.jsonl", cfg)
+    save_tasks(all_found, "structural.jsonl", config)
 
 
 if __name__ == "__main__":

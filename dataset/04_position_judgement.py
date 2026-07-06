@@ -1,3 +1,21 @@
+"""Generator for the Position Judgment category (benchmark/position_judgement.jsonl).
+
+Fourth rung of the abstraction ladder: holistic evaluation. Given a FEN, estimate the
+Stockfish centipawn evaluation (from White's perspective) by choosing the closest of five
+fixed options: -400, -200, 0, +200, +400. That makes it effectively 5-way classification —
+random guessing scores 20%, and even top models stay <= 40% in the paper.
+
+Positions come from the Lichess evaluations dump (lichess_db_eval.jsonl.zst): community-
+contributed deep Stockfish analyses. Ground truth is the deepest available eval's principal
+variation score. Positions are sampled only from five narrow evaluation bands (one per
+option, e.g. "winning" = +350..+450) so each task has an unambiguous nearest option;
+mate scores and positions between bands are discarded.
+
+Usage:
+    python dataset/04_position_judgement.py --data_path data/raw/lichess_db_eval.jsonl.zst \
+        --output_root data/benchmark --tasks_per_category 100
+"""
+
 import argparse
 import hashlib
 import json
@@ -10,6 +28,9 @@ import zstandard as zstd
 
 from utils import FORMAT_EXAMPLES_CENTIPAWN, ChessQuestionAnsweringTask, construct_prompt, save_tasks, seed_everything
 
+# Sampling bands (centipawns, White's perspective). Each band is centered on one of the five
+# answer options with a +/-50cp tolerance; gaps between bands are intentional so no position
+# sits ambiguously between two options.
 EVAL_CATEGORIES = {
     "neutral": {"min": -50, "max": 50, "name": "neutral"},
     "winning": {"min": 350, "max": 450, "name": "winning"},
@@ -20,11 +41,17 @@ EVAL_CATEGORIES = {
 
 
 def _get_position_hash(fen: str) -> str:
+    """Hash the first four FEN fields (board, turn, castling, en passant) for dedup.
+
+    Move counters are excluded so transpositions reached at different move numbers count
+    as the same position.
+    """
     position_part = " ".join(fen.split()[:4])
     return hashlib.md5(position_part.encode()).hexdigest()[:16]
 
 
 def _determine_evaluation_category(centipawns: int) -> str | None:
+    """Map a centipawn eval to its sampling band, or None if it falls in a gap (discard)."""
     for category, bounds in EVAL_CATEGORIES.items():
         if bounds["min"] <= centipawns <= bounds["max"]:
             return category
@@ -32,16 +59,24 @@ def _determine_evaluation_category(centipawns: int) -> str | None:
 
 
 def _find_best_option_set(target_eval: int) -> list[int]:
-    # Use fixed options for all judgment tasks
+    """Return the answer options. Fixed for every task (the parameter is vestigial —
+    upstream presumably experimented with target-dependent option sets)."""
     return [-400, -200, 0, 200, 400]
 
 
 def _get_correct_answer(target_eval: int, options: list[int]) -> str:
-    closest_option = min(options, key=lambda x: abs(x - target_eval))
+    """Return the option closest to the true eval — unambiguous given the band sampling."""
+    closest_option = min(options, key=lambda option_value: abs(option_value - target_eval))
     return str(closest_option)
 
 
 def _parse_evaluation_line(line: str) -> dict[str, Any] | None:
+    """Parse one JSON line of the Lichess eval dump into a flat record, or None to discard.
+
+    Takes the deepest engine analysis available for the position and its first principal
+    variation. Discards: malformed lines, lines missing FEN/evals, and mate scores (mate
+    has no centipawn value, so it can't be bucketed).
+    """
     try:
         data = json.loads(line)
         fen = data.get("fen", "")
@@ -50,15 +85,15 @@ def _parse_evaluation_line(line: str) -> dict[str, Any] | None:
         if not fen or not evals:
             return None
 
-        best_eval = max(evals, key=lambda e: e.get("depth", 0))
+        best_eval = max(evals, key=lambda eval_entry: eval_entry.get("depth", 0))
         depth = best_eval.get("depth", 0)
         knodes = best_eval.get("knodes", 0)
 
-        pvs = best_eval.get("pvs", [])
-        if not pvs:
+        principal_variations = best_eval.get("pvs", [])
+        if not principal_variations:
             return None
 
-        best_pv = pvs[0]
+        best_pv = principal_variations[0]
         centipawns = best_pv.get("cp", 0)
         line_moves = best_pv.get("line", "")
 
@@ -81,16 +116,24 @@ def _parse_evaluation_line(line: str) -> dict[str, Any] | None:
 
 
 def _load_evaluations(data_path: str, max_evaluations: int | None = None) -> list[dict[str, Any]]:
+    """Stream parsed eval records from the zstd-compressed JSONL dump.
+
+    The dump is far too large to decompress to disk, so this reads 1 MB compressed chunks,
+    splitting on newlines and carrying the trailing partial line in ``buffer`` to the next
+    chunk (flushed once at EOF). ``max_evaluations`` caps the number of *parsed* records;
+    the ``remaining_needed * 2`` slice is just a throttle assuming roughly half of raw lines
+    survive parsing.
+    """
     evaluations = []
     evaluations_loaded = 0
 
     try:
-        with open(data_path, "rb") as f:
-            dctx = zstd.ZstdDecompressor()
+        with open(data_path, "rb") as compressed_file:
+            decompressor = zstd.ZstdDecompressor()
             chunk_size = 1024 * 1024
             buffer = ""
 
-            with dctx.stream_reader(f) as reader:
+            with decompressor.stream_reader(compressed_file) as reader:
                 while True:
                     chunk = reader.read(chunk_size)
                     if not chunk:
@@ -127,8 +170,8 @@ def _load_evaluations(data_path: str, max_evaluations: int | None = None) -> lis
                         evaluations.append(evaluation)
                         evaluations_loaded += 1
 
-    except Exception as e:
-        raise Exception(f"Error loading evaluations: {e}") from e
+    except Exception as error:
+        raise Exception(f"Error loading evaluations: {error}") from error
 
     return evaluations
 
@@ -136,6 +179,11 @@ def _load_evaluations(data_path: str, max_evaluations: int | None = None) -> lis
 def generate_centipawn_eval_task(
     evaluation: dict[str, Any], category: str, found_counter: dict[str, int]
 ) -> ChessQuestionAnsweringTask:
+    """Build one 5-option centipawn-estimation task from a parsed eval record.
+
+    The true eval, engine depth, and best line go into metadata — the model sees only the
+    FEN and the five options.
+    """
     task_id = f"position_judgement_{category}_{found_counter[category]:04d}"
 
     option_values = _find_best_option_set(evaluation["best_evaluation"])
@@ -166,12 +214,17 @@ def generate_centipawn_eval_task(
     )
 
 
-def find_centipawn_eval_tasks(cfg):
+def find_centipawn_eval_tasks(config):
+    """Load evals, dedup by position hash, bucket into the five bands, sample per band.
+
+    Each band is shuffled then truncated to config.tasks_per_category, so the output is a
+    uniform random sample within each evaluation band.
+    """
     found_counter = {category: 0 for category in EVAL_CATEGORIES}
     found = []
     position_hashes = set()
 
-    evaluations = _load_evaluations(cfg.data_path, cfg.max_evaluations if cfg.max_evaluations > 0 else None)
+    evaluations = _load_evaluations(config.data_path, config.max_evaluations if config.max_evaluations > 0 else None)
 
     eval_buckets = defaultdict(list)
 
@@ -190,10 +243,10 @@ def find_centipawn_eval_tasks(cfg):
             continue
 
         random.shuffle(evaluations)
-        selected_evaluations = evaluations[: cfg.tasks_per_category]
+        selected_evaluations = evaluations[: config.tasks_per_category]
 
         for evaluation in selected_evaluations:
-            if found_counter[category] >= cfg.tasks_per_category:
+            if found_counter[category] >= config.tasks_per_category:
                 break
             task = generate_centipawn_eval_task(evaluation, category, found_counter)
             found_counter[category] += 1
@@ -204,6 +257,7 @@ def find_centipawn_eval_tasks(cfg):
 
 
 def parse_args():
+    """Parse CLI flags. Defaults use the upstream repo layout — pass explicit paths in this repo."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="../../data/raw/lichess_db_eval.jsonl.zst")
     parser.add_argument("--output_root", type=str, default="../../data/benchmark")
@@ -214,10 +268,11 @@ def parse_args():
 
 
 def main():
-    cfg = parse_args()
-    seed_everything(cfg.seed)
-    found = find_centipawn_eval_tasks(cfg)
-    save_tasks(found, "position_judgement.jsonl", cfg)
+    """Generate the Position Judgment benchmark file from the Lichess eval dump."""
+    config = parse_args()
+    seed_everything(config.seed)
+    found = find_centipawn_eval_tasks(config)
+    save_tasks(found, "position_judgement.jsonl", config)
 
 
 if __name__ == "__main__":

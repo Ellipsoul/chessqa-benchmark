@@ -19,10 +19,52 @@ way, ChessQA captures a more comprehensive picture of chess ability and understa
 
 ## Repository Layout
 
-- `code/dataset`: dataset generation scripts for each category
-- `code/eval`: OpenRouter inference runner and result browser
-- `benchmark`: generated benchmark JSONL files (one per category)
-- `results`: per‑model outputs (`*.jsonl`, `*_pretty.json`, `*_stats.json`)
+- `dataset/`: dataset generation scripts for each category
+- `eval/`: OpenRouter inference runner
+- `benchmark/`: generated benchmark JSONL files (one per category)
+- `results/`: per‑model outputs (`*.jsonl`, `*_pretty.json`, `*_stats.json`)
+- `docs/`: project brief, the ChessQA paper, and planning notes
+
+## Deviations from Upstream (CSSLab/chessqa-benchmark)
+
+This repo is a fork of [CSSLab/chessqa-benchmark](https://github.com/CSSLab/chessqa-benchmark)
+(arXiv:2510.23948). It deliberately deviates from upstream in the following ways — keep this
+list in mind when comparing any numbers against the paper's published results.
+
+**Behavioral fixes (change model-facing behavior):**
+
+1. **Pin prompt bug fixed** (`dataset/02_motifs.py`). Upstream reassigned `task_description`
+   instead of appending, so every `motifs_pin` question shipped *without* its definition
+   sentence ("Identify all absolute pins… would expose its own king to check."). The
+   checked-in `benchmark/motifs.jsonl` still contains the upstream (truncated) prompts;
+   any *regenerated* motifs data will include the full sentence and is therefore not
+   prompt-identical to the paper's pin tasks.
+2. **`--add-context` piece ordering** (`eval/run_openrouter.py`, `get_context`). Upstream
+   injected the piece arrangement in board-scan order (a1→h8); this fork uses the same
+   canonical ordering the `piece_arrangement` answers demand (White then Black,
+   King/Queen/Rook/Bishop/Knight/Pawn, squares alphabetical). Any run using `--add-context`
+   (`-piecearr` result files) is not byte-comparable to upstream's piecearr runs.
+3. **Seeded subsampling** (`eval/run_openrouter.py`, `load_tasks`). `--N-samples-per-task`
+   now shuffles with a fixed-seed RNG (upstream's comment claimed a fixed seed but used the
+   unseeded global RNG). Subsampled runs are now reproducible and resume-coherent; full runs
+   are unaffected.
+
+**Unaffected:** full-benchmark runs without `--add-context` use exactly the checked-in task
+prompts, so they remain apples-to-apples with the paper.
+
+**Non-behavioral deviations:**
+
+- Layout: scripts live at top-level `dataset/` and `eval/` (upstream: `code/dataset`,
+  `code/eval`); upstream's `code/plot` and `eval/browse_results.py` are not present. Because
+  of the move, in-script default paths resolve outside the repo — always pass
+  `--dataset-root benchmark --output-dir results` (and explicit paths to the generators).
+- API key: the runner reads `../keys/api_keys.json` (a `keys/` directory *beside* this
+  checkout) expecting `{"openrouter_api_key": "..."}`; it does **not** read
+  `OPENROUTER_API_KEY` from the environment.
+- Tooling: pinned/capped `requirements.txt` (verified via fresh-venv install), ruff lint
+  config in `pyproject.toml`, `Makefile`, `.venv`-based `setup.sh`, and a comprehensive
+  documentation pass over all scripts. Stale CLI help texts for `--workers`/`--max-retries`/
+  `--timeout` were corrected to match the actual defaults (256 / 10 / 6000).
 
 ## Install
 

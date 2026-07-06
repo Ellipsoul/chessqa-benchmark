@@ -52,9 +52,10 @@ list in mind when comparing any numbers against the paper's published results.
    `--backend {vercel-gateway,openrouter}` flag (default `vercel-gateway`); the paper's 23
    runs all went through OpenRouter, which remains selectable for apples-to-apples
    comparisons (those result files get an `-openrouter` suffix). Two knock-on effects:
-   per-response dollar-cost accounting is OpenRouter-only, so cost columns in
-   `*_stats.json` are zero on gateway runs (spend lives in the Vercel dashboard), and
-   each result now records a `thinking_source` fidelity tag
+   cost accounting differs slightly (verified live: the gateway *does* return per-call
+   `cost`/`gateway_cost`/`market_cost` in `usage`, so cost columns in `*_stats.json` are
+   populated on both backends; the Vercel dashboard adds request-level observability),
+   and each result now records a `thinking_source` fidelity tag
    (`full_text`/`summary`/`encrypted_only`/…) derived from the gateway's typed
    `reasoning_details` blocks.
 

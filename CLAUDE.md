@@ -32,20 +32,21 @@ Other docs: `docs/ChessQA_Paper.pdf` (the paper) and `docs/Chess_as_a_Benchmark_
 The README documents the upstream layout (`code/dataset`, `code/eval`, `code/plot`). In this repo the scripts live at top-level `dataset/` and `eval/`; the `code/plot` and `eval/browse_results.py` scripts referenced by README/setup.sh do not exist here. Because of the move, **default paths inside the scripts resolve via `script_dir.parent.parent` to outside the repo**, so always pass explicit paths:
 
 - `eval/run_openrouter.py`: pass `--dataset-root benchmark --output-dir results`
-- API key: the runner does **not** read `OPENROUTER_API_KEY` from the environment despite what the README says — it reads `../keys/api_keys.json` (sibling of the repo root) expecting `{"openrouter_api_key": "..."}`.
+- API keys: the default backend (Vercel AI Gateway) reads `AI_GATEWAY_API_KEY` from the environment (fallback `VERCEL_OIDC_TOKEN`). `--backend openrouter` reads `OPENROUTER_API_KEY`, falling back to the legacy `../keys/api_keys.json` (sibling of the repo root) expecting `{"openrouter_api_key": "..."}`.
 
 ## Commands
 
 ```bash
 pip install -r requirements.txt          # or ./setup.sh
 
-# Run inference against the checked-in benchmark
-python eval/run_openrouter.py --dataset-root benchmark --model anthropic/claude-sonnet-4.5 \
-  --output-dir results --workers 256
+# Run inference against the checked-in benchmark (default backend: Vercel AI Gateway)
+AI_GATEWAY_API_KEY=... python eval/run_openrouter.py --dataset-root benchmark \
+  --model anthropic/claude-sonnet-4.5 --output-dir results --workers 256
 
-# Useful flags: --max-tasks N, --N-samples-per-task N (uniform sample per task_type),
-# --add-context (inject piece arrangement + legal moves), --enable-thinking,
-# --use-format-example-group {1,2}, --no-resume,
+# Useful flags: --backend {vercel-gateway,openrouter} (openrouter = the paper's transport,
+# results get an -openrouter suffix), --max-tasks N, --N-samples-per-task N (deterministic
+# uniform sample per task_type), --add-context (inject piece arrangement + legal moves),
+# --enable-thinking, --use-format-example-group {1,2}, --no-resume,
 # --eval-only (re-extract/re-score an existing results JSONL without API calls)
 
 # Regenerate datasets (needs Lichess dumps under data/raw/, see README)
@@ -64,8 +65,8 @@ There is no test suite, linter, or package build — plain Python scripts.
 
 **Prompt templating:** questions contain literal `CONTEXT_PLACEHOLDER` and `FORMAT_EXAMPLE_PLACEHOLDER` strings, resolved at inference time by `format_prompt()` in `eval/run_openrouter.py`. Keep placeholders intact in the JSONL — downstream users reconstruct prompt variants from them.
 
-**Eval runner** (`eval/run_openrouter.py`, single file): loads all `*.jsonl` from `--dataset-root`, fans out via `multiprocessing.Pool` to the OpenRouter chat completions API (some models have hardcoded provider-order overrides in `call_model`), extracts the answer from the last `FINAL ANSWER:` line (with `\boxed{}` fallbacks), and scores with `evaluate_answer_with_error_type`. Error taxonomy: `correct`, `max_token_reached` (≥98% of max-tokens), `format_error`, `wrong_answer`, and `multi_extra_items`/`multi_missing_items`/`multi_false_items` for multi answers. Note this classifies *answers*, not *reasoning* — the Phase 3 gap. Thinking traces come back in `thinking_content` (extracted from OpenRouter `reasoning`/`reasoning_details` fields) and are saved per task in the results JSONL.
+**Eval runner** (`eval/run_openrouter.py`, single file; name kept from upstream): loads all `*.jsonl` from `--dataset-root`, fans out via `multiprocessing.Pool` to the selected backend's chat completions API — Vercel AI Gateway by default, OpenRouter via `--backend openrouter` (OpenRouter-only: per-call cost accounting and hardcoded provider-order pins in `call_model`; gateway runs report zero cost in stats, spend lives in the Vercel dashboard). Extracts the answer from the last `FINAL ANSWER:` line (with `\boxed{}` fallbacks) and scores with `evaluate_answer_with_error_type`. Error taxonomy: `correct`, `max_token_reached` (≥98% of max-tokens), `format_error`, `wrong_answer`, and `multi_extra_items`/`multi_missing_items`/`multi_false_items` for multi answers. Note this classifies *answers*, not *reasoning* — the Phase 3 gap. Thinking traces are saved per task as `thinking_content` plus a `thinking_source` fidelity tag (`full_text`/`summary`/`untyped`/`plain`/`encrypted_only`/`none`, from `extract_thinking`) — the gateway's typed `reasoning_details` blocks make full-trace vs. summary machine-legible, which is the Phase 3 gating signal.
 
-**Resume behavior:** runs resume by default from the existing results JSONL, matching by `task_id`. The results filename encodes the variant — `<model with / and : replaced by _>` plus suffixes `-thinking`, `-piecearr` (from `--add-context`), `-fmt2` (from format example group 2) — so flags must match the original run for resume and `--eval-only` to find the file.
+**Resume behavior:** runs resume by default from the existing results JSONL, matching by `task_id`. The results filename encodes the variant — `<model with / and : replaced by _>` plus suffixes `-thinking`, `-piecearr` (from `--add-context`), `-fmt2` (from format example group 2), `-openrouter` (from `--backend openrouter`) — so flags must match the original run for resume and `--eval-only` to find the file.
 
 **Dataset generators** (`dataset/`): numbered by category; all share `dataset/utils.py` (task dataclass, `FORMAT_EXAMPLES_*` constants, FEN/piece-arrangement helpers, seeding). `05_semantic.py` builds MCQs from commentary and needs `sentence-transformers`/`faiss`; the `05_1`–`05_3` comment filtering/cleaning/judging helpers are an offline vLLM pipeline used to produce its input (`comment_dataset.final.json`). Regenerating with post-cutoff data doubles as a contamination control.

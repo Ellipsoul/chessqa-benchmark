@@ -1,6 +1,17 @@
-"""ChessQA evaluation runner: benchmark JSONL -> OpenRouter -> scored results.
+"""ChessQA evaluation runner: benchmark JSONL -> LLM gateway -> scored results.
 
-The single-file harness used for all of the paper's 23 runs. End-to-end flow:
+Descended from the single-file harness used for all of the paper's 23 runs (which spoke
+only to OpenRouter). This version supports two selectable backends via ``--backend``:
+
+- ``vercel-gateway`` (default): Vercel AI Gateway's OpenAI-compatible endpoint. Auth via
+  the ``AI_GATEWAY_API_KEY`` env var (fallback: ``VERCEL_OIDC_TOKEN``). Note the gateway
+  does not return per-call dollar cost, so cost columns in stats are zero for these runs —
+  spend lives in the Vercel dashboard.
+- ``openrouter``: the paper's original transport, kept for apples-to-apples comparison
+  runs. Auth via ``OPENROUTER_API_KEY`` env var, falling back to the legacy
+  ``../keys/api_keys.json`` beside the checkout (``{"openrouter_api_key": "..."}``).
+
+End-to-end flow:
 
 1. Load every ``*.jsonl`` under ``--dataset-root`` (optionally subsampled per task type).
 2. Resume: match tasks against the existing results file by ``task_id``; only unfinished
@@ -9,24 +20,22 @@ The single-file harness used for all of the paper's 23 runs. End-to-end flow:
    (CONTEXT_PLACEHOLDER, FORMAT_EXAMPLE_PLACEHOLDER) according to ``--add-context`` and
    ``--use-format-example-group``.
 4. Fan out over a ``multiprocessing.Pool`` (``--workers``); each worker POSTs to the
-   OpenRouter chat completions API with retries, and pulls thinking traces out of the
-   response's ``reasoning``/``reasoning_details`` fields when present.
+   selected backend's chat completions API with retries, and pulls thinking traces out of
+   the response's ``reasoning``/``reasoning_details`` fields when present, recording a
+   ``thinking_source`` fidelity tag (full_text / summary / encrypted_only / ...) per task.
 5. ``extract_answer`` takes the last ``FINAL ANSWER:`` line (with ``\\boxed{}`` fallback);
    ``evaluate_answer_with_error_type`` scores it (exact match for "single", set match for
    "multi") and classifies failures. Note this classifies *answers only* — nothing inspects
    the reasoning trace (that gap is this project's Phase 3).
 
 Outputs, all under ``--output-dir`` and all named ``<model with / and : -> _>`` plus
-variant suffixes ``-thinking`` / ``-piecearr`` / ``-fmt2`` (flags must match for resume and
-``--eval-only`` to find the file):
-- ``<name>.jsonl``  one result per line: the full task + an ``inference`` block
-  (prompt, response, thinking_content, extracted answer, correctness, error_type, usage).
+variant suffixes ``-thinking`` / ``-piecearr`` / ``-fmt2`` / ``-openrouter`` (flags must
+match for resume and ``--eval-only`` to find the file; gateway runs get no backend suffix):
+- ``<name>.jsonl``  one result per line: the full task + an ``inference`` block (prompt,
+  response, thinking_content, thinking_source, extracted answer, correctness, error_type,
+  usage).
 - ``<name>_pretty.json``  same content, indented for humans.
 - ``<name>_stats.json``  aggregate accuracy/cost/error-type/per-category stats.
-
-API key: read from ``../keys/api_keys.json`` relative to the repo root (i.e. a ``keys/``
-directory *beside* the checkout), expecting ``{"openrouter_api_key": "..."}``. The
-OPENROUTER_API_KEY environment variable is NOT read, despite what the upstream README says.
 
 ``--eval-only`` re-runs steps 5+ on an existing results file without any API calls —
 useful after changing extraction/scoring logic.
@@ -34,6 +43,7 @@ useful after changing extraction/scoring logic.
 
 import argparse
 import json
+import os
 import random
 import re
 import time
@@ -44,6 +54,91 @@ from typing import Any
 import chess
 import requests
 from tqdm import tqdm
+
+BACKEND_URLS = {
+    "vercel-gateway": "https://ai-gateway.vercel.sh/v1/chat/completions",
+    "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+}
+
+
+def resolve_api_key(backend: str) -> str:
+    """Resolve the API key for the chosen backend, failing fast with a setup hint.
+
+    vercel-gateway: ``AI_GATEWAY_API_KEY`` env var, falling back to ``VERCEL_OIDC_TOKEN``
+    (the short-lived JWT written to .env.local by ``vercel env pull`` — only useful if the
+    caller exported it into the environment).
+    openrouter: ``OPENROUTER_API_KEY`` env var, falling back to the legacy upstream
+    location ``../keys/api_keys.json`` beside the checkout.
+    """
+    if backend == "vercel-gateway":
+        api_key = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
+        if not api_key:
+            raise SystemExit(
+                "No Vercel AI Gateway credential found. Set AI_GATEWAY_API_KEY "
+                "(create one in the Vercel dashboard under AI Gateway) or export a "
+                "VERCEL_OIDC_TOKEN (via `vercel env pull`)."
+            )
+        return api_key
+
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if api_key:
+        return api_key
+    keys_path = Path(__file__).parent.parent.parent / "keys" / "api_keys.json"
+    try:
+        with open(keys_path) as keys_file:
+            api_key = json.load(keys_file).get("openrouter_api_key")
+    except FileNotFoundError:
+        api_key = None
+    if not api_key:
+        raise SystemExit(
+            "No OpenRouter credential found. Set OPENROUTER_API_KEY or provide "
+            f"{keys_path} containing {{\"openrouter_api_key\": \"...\"}}."
+        )
+    return api_key
+
+
+def extract_thinking(message: dict[str, Any]) -> tuple[str, str]:
+    """Extract the thinking trace and classify its fidelity.
+
+    Vercel AI Gateway (and newer OpenRouter responses) return a typed
+    ``reasoning_details`` array whose block types make trace fidelity machine-legible —
+    the signal that gates Phase 3 depth:
+    - ``reasoning.text``: the actual chain-of-thought (Anthropic-style, may be signed).
+    - ``reasoning.summary``: a condensed rendering (OpenAI-style) — NOT the real trace.
+    - ``reasoning.encrypted``: redacted/protected content, unusable for analysis.
+
+    Returns ``(thinking_content, thinking_source)`` where source is one of:
+    ``full_text`` | ``summary`` | ``untyped`` (legacy dicts with only a "text" key, or
+    bare strings — fidelity unknown) | ``plain`` (only the flat ``message.reasoning``
+    string was present) | ``encrypted_only`` | ``none``.
+    """
+    details = message.get("reasoning_details") or []
+    text_parts = [
+        detail.get("text")
+        for detail in details
+        if isinstance(detail, dict) and detail.get("type") == "reasoning.text" and detail.get("text")
+    ]
+    summary_parts = [
+        detail.get("summary")
+        for detail in details
+        if isinstance(detail, dict) and detail.get("type") == "reasoning.summary" and detail.get("summary")
+    ]
+    untyped_parts = [
+        detail.get("text") for detail in details if isinstance(detail, dict) and "type" not in detail and detail.get("text")
+    ]
+    untyped_parts += [detail for detail in details if isinstance(detail, str)]
+
+    if text_parts:
+        return "\n".join(text_parts), "full_text"
+    if summary_parts:
+        return "\n".join(summary_parts), "summary"
+    if untyped_parts:
+        return "\n".join(untyped_parts), "untyped"
+    if message.get("reasoning"):
+        return str(message["reasoning"]), "plain"
+    if any(isinstance(detail, dict) and detail.get("type") == "reasoning.encrypted" for detail in details):
+        return "", "encrypted_only"
+    return "", "none"
 
 
 def load_tasks(
@@ -343,17 +438,28 @@ def process_single_task(args_tuple):
     re-read of the key file per task). Returns the original task dict + an ``inference``
     block — the record that becomes one line of the results JSONL.
     """
-    task, model, add_context, format_example_group, api_key, max_retries, timeout, max_tokens, enable_thinking = (
-        args_tuple
-    )
+    (
+        task,
+        model,
+        add_context,
+        format_example_group,
+        api_key,
+        max_retries,
+        timeout,
+        max_tokens,
+        enable_thinking,
+        backend,
+    ) = args_tuple
 
     # Create inferencer instance for this process
     # Filename suffix is handled by the parent inferencer when saving; child only calls the API
-    inferencer = OpenrouterInferencer(model, add_context, max_retries, timeout, max_tokens, enable_thinking)
+    inferencer = OpenrouterInferencer(
+        model, add_context, max_retries, timeout, max_tokens, enable_thinking, backend=backend
+    )
     inferencer.api_key = api_key
 
     prompt = format_prompt(task, add_context, format_example_group)
-    response, thinking_content, usage = inferencer.call_model(prompt)
+    response, thinking_content, thinking_source, usage = inferencer.call_model(prompt)
     extracted, extraction_successful = extract_answer(response)
 
     # Use answer_type-aware evaluation with error type classification
@@ -368,6 +474,7 @@ def process_single_task(args_tuple):
         "prompt": prompt,
         "response": response,
         "thinking_content": thinking_content,
+        "thinking_source": thinking_source,
         "extracted": extracted,
         "extraction_successful": extraction_successful,
         "is_correct": correct,
@@ -377,24 +484,31 @@ def process_single_task(args_tuple):
     return result
 
 
-def _build_variant_suffix(add_context: bool, format_example_group: int) -> str:
-    """Return a short suffix for filenames to distinguish experiment variants."""
+def _build_variant_suffix(add_context: bool, format_example_group: int, backend: str = "vercel-gateway") -> str:
+    """Return a short suffix for filenames to distinguish experiment variants.
+
+    The default backend (vercel-gateway) adds no suffix; OpenRouter runs are tagged
+    ``-openrouter`` so results from the two transports never collide or cross-resume.
+    """
     parts = []
     if add_context:
         parts.append("piecearr")
     if format_example_group == 2:
         parts.append("fmt2")
+    if backend == "openrouter":
+        parts.append("openrouter")
     return ("-" + "-".join(parts)) if parts else ""
 
 
 class OpenrouterInferencer:
-    """Thin client around the OpenRouter chat completions API plus result-file management.
+    """Thin client around a chat-completions backend plus result-file management.
 
-    Holds the run configuration (model, retries, token budget, thinking mode, filename
-    suffix) and owns three concerns: calling the API with retries (``call_model``),
-    orchestrating sequential/parallel inference (``run_inference``), and incremental
-    result persistence (``_save_*``). Construction reads the API key from
-    ``../keys/api_keys.json`` relative to the repo root — see the module docstring.
+    (Name kept from upstream for continuity; it now speaks both Vercel AI Gateway and
+    OpenRouter.) Holds the run configuration (backend, model, retries, token budget,
+    thinking mode, filename suffix) and owns three concerns: calling the API with retries
+    (``call_model``), orchestrating sequential/parallel inference (``run_inference``),
+    and incremental result persistence (``_save_*``). Credentials come from
+    ``resolve_api_key`` — see the module docstring.
     """
 
     def __init__(
@@ -406,6 +520,7 @@ class OpenrouterInferencer:
         max_tokens: int = 2048,
         enable_thinking: bool = False,
         filename_suffix: str = "",
+        backend: str = "vercel-gateway",
     ):
         self.model = model
         self.add_context = add_context
@@ -415,28 +530,25 @@ class OpenrouterInferencer:
         self.enable_thinking = enable_thinking
         # Additional filename suffix to differentiate experiment variants in outputs
         self.filename_suffix = filename_suffix
-        keys_path = Path(__file__).parent.parent.parent / "keys" / "api_keys.json"
-        with open(keys_path) as keys_file:
-            keys = json.load(keys_file)
-        self.api_key = keys.get("openrouter_api_key")
-        self.url = "https://openrouter.ai/api/v1/chat/completions"
+        self.backend = backend
+        self.api_key = resolve_api_key(backend)
+        self.url = BACKEND_URLS[backend]
 
-    def call_model(self, prompt: str) -> tuple[str, str, dict[str, Any]]:
+    def call_model(self, prompt: str) -> tuple[str, str, str, dict[str, Any]]:
         """POST one chat completion with exponential-backoff retries.
 
         Request notes:
-        - ``usage: {include: true}`` asks OpenRouter to return per-call cost accounting.
         - ``--enable-thinking`` maps to ``reasoning: {effort: "medium"}`` (the paper's
-          setting); thinking models get the full ``max_tokens`` as their budget.
-        - A few models get hardcoded provider-order overrides below — upstream pinned
-          providers whose responses (esp. reasoning traces) were reliable for that model.
+          setting) — the same schema on both backends; thinking models get the full
+          ``max_tokens`` as their budget.
+        - OpenRouter-only fields: ``usage: {include: true}`` (per-call cost accounting —
+          the gateway reports spend in its dashboard instead and returns token counts by
+          default) and hardcoded provider-order pins for three models whose responses
+          upstream found unreliable on other providers.
 
-        Returns ``(content, thinking_content, usage)``. ``thinking_content`` is best-effort:
-        OpenRouter surfaces reasoning either as ``message.reasoning`` (string) or
-        ``message.reasoning_details`` (list of dicts with "text"); whether it is the FULL
-        trace or a summary depends on the provider — the fidelity question that gates
-        Phase 3. After exhausting retries the content is the literal string "ERROR: ...",
-        which resume logic later treats as incomplete.
+        Returns ``(content, thinking_content, thinking_source, usage)``; the trace fields
+        come from ``extract_thinking``. After exhausting retries the content is the
+        literal string "ERROR: ...", which resume logic later treats as incomplete.
         """
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
@@ -444,33 +556,35 @@ class OpenrouterInferencer:
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": self.max_tokens,
-            "usage": {"include": True},
         }
 
         if self.enable_thinking:
             data["reasoning"] = {"effort": "medium"}
 
-        if self.model == "qwen/qwen3-next-80b-a3b-thinking":
-            data["provider"] = {
-                "order": [
-                    "google-vertex",
-                    "together",
-                ]
-            }
+        if self.backend == "openrouter":
+            data["usage"] = {"include": True}
 
-        if self.model == "deepseek/deepseek-chat-v3.1":
-            data["provider"] = {
-                "order": [
-                    "fireworks",
-                ]
-            }
+            if self.model == "qwen/qwen3-next-80b-a3b-thinking":
+                data["provider"] = {
+                    "order": [
+                        "google-vertex",
+                        "together",
+                    ]
+                }
 
-        if self.model == "deepseek/deepseek-r1-0528":
-            data["provider"] = {
-                "order": [
-                    "google-vertex",
-                ]
-            }
+            if self.model == "deepseek/deepseek-chat-v3.1":
+                data["provider"] = {
+                    "order": [
+                        "fireworks",
+                    ]
+                }
+
+            if self.model == "deepseek/deepseek-r1-0528":
+                data["provider"] = {
+                    "order": [
+                        "google-vertex",
+                    ]
+                }
 
         for attempt in range(self.max_retries):
             try:
@@ -479,35 +593,15 @@ class OpenrouterInferencer:
                 )
                 response.raise_for_status()
                 result = response.json()
-                # Extract main content
-                content = result["choices"][0]["message"]["content"].strip()
-
-                # Extract thinking/reasoning content
-                thinking_content = ""
                 message = result["choices"][0]["message"]
-
-                # Try different reasoning extraction methods.
-                # (The first branch is vestigial: ``message`` is a dict, so hasattr() is
-                # always False and the third branch is what actually catches ``reasoning``.)
-                if hasattr(message, "reasoning") and message.get("reasoning"):
-                    thinking_content = message["reasoning"]
-                elif "reasoning_details" in message and message["reasoning_details"]:
-                    reasoning_parts = []
-                    for detail in message["reasoning_details"]:
-                        if isinstance(detail, dict) and "text" in detail:
-                            reasoning_parts.append(detail["text"])
-                        elif isinstance(detail, str):
-                            reasoning_parts.append(detail)
-                    thinking_content = "\n".join(reasoning_parts)
-                elif "reasoning" in message and message["reasoning"]:
-                    thinking_content = str(message["reasoning"])
-
+                content = message["content"].strip()
+                thinking_content, thinking_source = extract_thinking(message)
                 usage = result.get("usage", {})
-                return content, thinking_content, usage
+                return content, thinking_content, thinking_source, usage
 
             except Exception as error:
                 if attempt == self.max_retries - 1:
-                    return f"ERROR: {error}", "", {}
+                    return f"ERROR: {error}", "", "none", {}
                 # Exponential backoff with jitter
                 wait_time = (2**attempt) + random.uniform(0, 1)
                 time.sleep(wait_time)
@@ -543,7 +637,7 @@ class OpenrouterInferencer:
             results = []
             for task_index, task in enumerate(tqdm(tasks, desc="Processing tasks")):
                 prompt = format_prompt(task, self.add_context, format_example_group)
-                response, thinking_content, usage = self.call_model(prompt)
+                response, thinking_content, thinking_source, usage = self.call_model(prompt)
                 extracted, extraction_successful = extract_answer(response)
 
                 # Use answer_type-aware evaluation with error type classification
@@ -558,6 +652,7 @@ class OpenrouterInferencer:
                     "prompt": prompt,
                     "response": response,
                     "thinking_content": thinking_content,
+                    "thinking_source": thinking_source,
                     "extracted": extracted,
                     "extraction_successful": extraction_successful,
                     "is_correct": correct,
@@ -596,6 +691,7 @@ class OpenrouterInferencer:
                     self.timeout,
                     self.max_tokens,
                     self.enable_thinking,
+                    self.backend,
                 )
                 for task in tasks
             ]
@@ -823,7 +919,7 @@ def main():
         model_safe_name = args.model.replace("/", "_").replace(":", "_")
         if args.enable_thinking:
             model_safe_name += "-thinking"
-        model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group)
+        model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
         results_file = args.output_dir / f"{model_safe_name}.jsonl"
 
         # Check if results file exists
@@ -897,7 +993,7 @@ def main():
             model_safe_name = args.model.replace("/", "_").replace(":", "_")
             if args.enable_thinking:
                 model_safe_name += "-thinking"
-            model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group)
+            model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
             results_file = args.output_dir / f"{model_safe_name}.jsonl"
             existing_results = load_existing_results(results_file)
 
@@ -908,7 +1004,7 @@ def main():
 
         if incomplete_tasks:
             # Build a filename suffix based on variant flags so this run doesn't overwrite others
-            variant_suffix = _build_variant_suffix(args.add_context, args.use_format_example_group)
+            variant_suffix = _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
             inferencer = OpenrouterInferencer(
                 args.model,
                 args.add_context,
@@ -917,6 +1013,7 @@ def main():
                 args.max_tokens,
                 args.enable_thinking,
                 filename_suffix=variant_suffix,
+                backend=args.backend,
             )
 
             start_time = time.time()
@@ -1024,7 +1121,7 @@ def main():
     model_safe_name = args.model.replace("/", "_").replace(":", "_")
     if args.enable_thinking:
         model_safe_name += "-thinking"
-    model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group)
+    model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
     results_file = args.output_dir / f"{model_safe_name}.jsonl"
     stats_file = args.output_dir / f"{model_safe_name}_stats.json"
 
@@ -1064,6 +1161,7 @@ def main():
                     "workers": num_workers,
                     "format_example_group": args.use_format_example_group,
                     "enable_thinking": args.enable_thinking,
+                    "backend": args.backend,
                 },
             },
             stats_output,
@@ -1169,6 +1267,15 @@ def parse_arguments():
     # parser.add_argument('--model', type=str, default='meta-llama/llama-4-maverick')
     # parser.add_argument('--model', type=str, default='meta-llama/llama-4-scout')
     # parser.add_argument('--model', type=str, default='google/gemma-3-27b-it')
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=["vercel-gateway", "openrouter"],
+        default="vercel-gateway",
+        help="Inference transport: Vercel AI Gateway (default; AI_GATEWAY_API_KEY) or OpenRouter "
+        "(the paper's original transport; OPENROUTER_API_KEY or ../keys/api_keys.json). "
+        "OpenRouter results files get an -openrouter suffix.",
+    )
     parser.add_argument("--output-dir", type=Path, default=default_output_dir, help="Directory to save results")
     parser.add_argument("--max-tasks", type=int, default=None)
     parser.add_argument(

@@ -83,10 +83,12 @@ prompts, so `--backend openrouter` runs remain apples-to-apples with the paper.
 - Optional for semantic MCQ embeddings: `pip install sentence-transformers faiss-cpu`
 
 API keys
-- Default backend (Vercel AI Gateway): set `AI_GATEWAY_API_KEY` in your environment
-  (create a key in the Vercel dashboard under AI Gateway).
-- `--backend openrouter`: set `OPENROUTER_API_KEY`, or put it in `../keys/api_keys.json`
-  beside the checkout (see `setup.sh`).
+- Easiest: `cp .env.example .env` and fill in your key(s) — the eval runner loads the
+  repo-root `.env` at startup (gitignored; real environment variables take precedence).
+- Default backend (Vercel AI Gateway): `AI_GATEWAY_API_KEY` (create a key in the Vercel
+  dashboard under AI Gateway).
+- `--backend openrouter`: `OPENROUTER_API_KEY`, or upstream's legacy
+  `../keys/api_keys.json` beside the checkout (see `setup.sh`).
 
 ## Data
 

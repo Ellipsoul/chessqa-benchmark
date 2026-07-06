@@ -32,7 +32,7 @@ Other docs: `docs/ChessQA_Paper.pdf` (the paper) and `docs/Chess_as_a_Benchmark_
 The README documents the upstream layout (`code/dataset`, `code/eval`, `code/plot`). In this repo the scripts live at top-level `dataset/` and `eval/`; the `code/plot` and `eval/browse_results.py` scripts referenced by README/setup.sh do not exist here. Because of the move, **default paths inside the scripts resolve via `script_dir.parent.parent` to outside the repo**, so always pass explicit paths:
 
 - `eval/run_openrouter.py`: pass `--dataset-root benchmark --output-dir results`
-- API keys: the default backend (Vercel AI Gateway) reads `AI_GATEWAY_API_KEY` from the environment (fallback `VERCEL_OIDC_TOKEN`). `--backend openrouter` reads `OPENROUTER_API_KEY`, falling back to the legacy `../keys/api_keys.json` (sibling of the repo root) expecting `{"openrouter_api_key": "..."}`.
+- API keys: the runner loads the repo-root `.env` at startup (`cp .env.example .env`; real env vars take precedence). Default backend (Vercel AI Gateway) uses `AI_GATEWAY_API_KEY` (fallback `VERCEL_OIDC_TOKEN`). `--backend openrouter` uses `OPENROUTER_API_KEY`, falling back to the legacy `../keys/api_keys.json` (sibling of the repo root) expecting `{"openrouter_api_key": "..."}`.
 
 ## Commands
 

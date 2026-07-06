@@ -61,6 +61,32 @@ BACKEND_URLS = {
 }
 
 
+def load_env_file(env_path: Path | None = None) -> None:
+    """Load KEY=VALUE lines from the repo-root ``.env`` into os.environ.
+
+    Stdlib-only stand-in for python-dotenv, so credentials can live in a gitignored
+    file instead of the shell profile. Real environment variables always win — values
+    from the file are applied only for keys not already set. Blank lines, ``#`` comments,
+    an optional ``export `` prefix, and single/double quotes around values are tolerated.
+    Called once at the top of main(); worker processes inherit the parent's environment.
+    """
+    if env_path is None:
+        env_path = Path(__file__).parent.parent / ".env"
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def resolve_api_key(backend: str) -> str:
     """Resolve the API key for the chosen backend, failing fast with a setup hint.
 
@@ -69,14 +95,17 @@ def resolve_api_key(backend: str) -> str:
     caller exported it into the environment).
     openrouter: ``OPENROUTER_API_KEY`` env var, falling back to the legacy upstream
     location ``../keys/api_keys.json`` beside the checkout.
+    Either variable may come from the shell or from the repo-root ``.env`` file
+    (see ``load_env_file``).
     """
     if backend == "vercel-gateway":
         api_key = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
         if not api_key:
             raise SystemExit(
-                "No Vercel AI Gateway credential found. Set AI_GATEWAY_API_KEY "
-                "(create one in the Vercel dashboard under AI Gateway) or export a "
-                "VERCEL_OIDC_TOKEN (via `vercel env pull`)."
+                "No Vercel AI Gateway credential found. Put AI_GATEWAY_API_KEY=... in the "
+                "repo-root .env file (cp .env.example .env), or export AI_GATEWAY_API_KEY / "
+                "VERCEL_OIDC_TOKEN in your shell. Keys are created in the Vercel dashboard "
+                "under AI Gateway."
             )
         return api_key
 
@@ -906,6 +935,7 @@ def main():
     All modes end identically: rewrite the results JSONL + pretty JSON, compute per-type /
     per-category / error-type stats into <name>_stats.json, and print the report tables.
     """
+    load_env_file()
     args = parse_arguments()
 
     # Set num_workers for metadata (used in eval-only mode too)

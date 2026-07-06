@@ -150,7 +150,7 @@ def is_pinned(board: chess.Board, piece_square: int) -> bool:
                 # Check if there are no other pieces between attacker and king
                 between_squares = chess.SquareSet.between(attacker_square, king_square)
                 between_squares.discard(piece_square)
-                if all(board.piece_at(sq) is None for sq in between_squares):
+                if all(board.piece_at(between_square) is None for between_square in between_squares):
                     return True
 
     # Diagonal pins: bishop/queen when piece and king share a diagonal (equal rank/file deltas).
@@ -162,7 +162,7 @@ def is_pinned(board: chess.Board, piece_square: int) -> bool:
                 # Check if there are no other pieces between attacker and king
                 between_squares = chess.SquareSet.between(attacker_square, king_square)
                 between_squares.discard(piece_square)
-                if all(board.piece_at(sq) is None for sq in between_squares):
+                if all(board.piece_at(between_square) is None for between_square in between_squares):
                     return True
 
     return False
@@ -433,8 +433,10 @@ def generate_capture_squares_task(
     generators below.
     """
     # Candidate pieces: anything except pawns and kings (their attack patterns are too trivial).
-    occupied_squares = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
-    occupied_squares = [sq for sq in occupied_squares if board.piece_at(sq).piece_type not in [chess.PAWN, chess.KING]]
+    occupied_squares = [square for square in chess.SQUARES if board.piece_at(square) is not None]
+    occupied_squares = [
+        square for square in occupied_squares if board.piece_at(square).piece_type not in [chess.PAWN, chess.KING]
+    ]
 
     if not occupied_squares:
         return None
@@ -479,8 +481,10 @@ def generate_control_squares_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask | None:
     """Build a 'which empty squares does this piece control' task (see capture task for the assert pattern)."""
-    occupied_squares = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
-    occupied_squares = [sq for sq in occupied_squares if board.piece_at(sq).piece_type not in [chess.PAWN, chess.KING]]
+    occupied_squares = [square for square in chess.SQUARES if board.piece_at(square) is not None]
+    occupied_squares = [
+        square for square in occupied_squares if board.piece_at(square).piece_type not in [chess.PAWN, chess.KING]
+    ]
 
     if not occupied_squares:
         return None
@@ -525,8 +529,10 @@ def generate_protect_squares_task(
     board: chess.Board, found_counter: dict[str, int], puzzle_id: str
 ) -> ChessQuestionAnsweringTask | None:
     """Build a 'which friendly pieces does this piece protect' task (see capture task for the assert pattern)."""
-    occupied_squares = [sq for sq in chess.SQUARES if board.piece_at(sq) is not None]
-    occupied_squares = [sq for sq in occupied_squares if board.piece_at(sq).piece_type not in [chess.PAWN, chess.KING]]
+    occupied_squares = [square for square in chess.SQUARES if board.piece_at(square) is not None]
+    occupied_squares = [
+        square for square in occupied_squares if board.piece_at(square).piece_type not in [chess.PAWN, chess.KING]
+    ]
 
     if not occupied_squares:
         return None
@@ -623,10 +629,10 @@ def _apply_uci_moves(start_fen: str, moves_uci: list[str]) -> tuple[str, list[st
     """Apply UCI moves to a FEN; return the final FEN (the ground truth) and the SAN transcript (metadata)."""
     board = chess.Board(start_fen)
     san_list = []
-    for u in moves_uci:
-        mv = chess.Move.from_uci(u)
-        san_list.append(board.san(mv))
-        board.push(mv)
+    for uci_move in moves_uci:
+        move = chess.Move.from_uci(uci_move)
+        san_list.append(board.san(move))
+        board.push(move)
     return board.fen(), san_list
 
 
@@ -667,8 +673,8 @@ def generate_fen_after_moves_task(
     )
 
 
-def find_structural_tasks(unique_positions, data, cfg):
-    """Drive all eleven generators until each has cfg.N_sample tasks.
+def find_structural_tasks(unique_positions, data, config):
+    """Drive all eleven generators until each has config.N_sample tasks.
 
     Puzzle phase: for each (shuffled) puzzle position, try the eight puzzle-based generators
     in dict order and keep at most one task per position — the ``break`` after a hit plus the
@@ -717,7 +723,7 @@ def find_structural_tasks(unique_positions, data, cfg):
         board = chess.Board(fen)
 
         for task_type, task_generator in task_generators.items():
-            if found_counter[task_type] >= cfg.N_sample:
+            if found_counter[task_type] >= config.N_sample:
                 continue
 
             try:
@@ -731,22 +737,22 @@ def find_structural_tasks(unique_positions, data, cfg):
             except Exception:
                 continue
 
-        if all(found_counter[t] >= cfg.N_sample for t in list(task_generators.keys())):
+        if all(found_counter[task_name] >= config.N_sample for task_name in list(task_generators.keys())):
             break
 
     # State tracking subtasks: short (1-5), mid (6-10), long (11-15) moves
     state_tracking_configs = [("short", 1, 5), ("mid", 6, 10), ("long", 11, 15)]
 
-    for game in read_pgn_games(cfg.pgn_path):
+    for game in read_pgn_games(config.pgn_path):
         # Check if all state tracking subtasks are complete
         if all(
-            found_counter[f"structural_state_tracking_{subtype}"] >= cfg.N_sample
+            found_counter[f"structural_state_tracking_{subtype}"] >= config.N_sample
             for subtype, _, _ in state_tracking_configs
         ):
             break
 
         for subtype, min_moves, max_moves in state_tracking_configs:
-            if found_counter[f"structural_state_tracking_{subtype}"] >= cfg.N_sample:
+            if found_counter[f"structural_state_tracking_{subtype}"] >= config.N_sample:
                 continue
 
             # Try different track lengths within the range
@@ -784,15 +790,15 @@ def parse_args():
 
 def main():
     """Generate the Structural benchmark file: seed, load puzzles, run generators, write JSONL."""
-    cfg = parse_args()
-    seed_everything(cfg.seed)
+    config = parse_args()
+    seed_everything(config.seed)
 
-    data = read_puzzles(cfg.puzzle_path)
+    data = read_puzzles(config.puzzle_path)
     unique_positions = set()
-    all_found = find_structural_tasks(unique_positions, data, cfg)
+    all_found = find_structural_tasks(unique_positions, data, config)
     print(f"Found {len(all_found)} total tasks")
 
-    save_tasks(all_found, "structural.jsonl", cfg)
+    save_tasks(all_found, "structural.jsonl", config)
 
 
 if __name__ == "__main__":

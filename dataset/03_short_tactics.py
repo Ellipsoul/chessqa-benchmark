@@ -49,8 +49,8 @@ def rating_to_level(rating):
         return "expert"
 
 
-def find_puzzles_by_rating(unique_puzzles, data, cfg):
-    """Collect cfg.N_sample_rating best-move tasks per difficulty band.
+def find_puzzles_by_rating(unique_puzzles, data, config):
+    """Collect config.N_sample_rating best-move tasks per difficulty band.
 
     Iterates the shuffled puzzle table, applying the quality filters (rating deviation,
     popularity, solution length), skipping already-used puzzles, and filling each band
@@ -68,9 +68,9 @@ def find_puzzles_by_rating(unique_puzzles, data, cfg):
         pv_length = len(row["Moves"].split(" "))
 
         if (
-            rating_deviation > cfg.max_rating_deviation
-            or popularity < cfg.min_popularity
-            or pv_length > cfg.max_pv_length
+            rating_deviation > config.max_rating_deviation
+            or popularity < config.min_popularity
+            or pv_length > config.max_pv_length
         ):
             continue
 
@@ -81,7 +81,7 @@ def find_puzzles_by_rating(unique_puzzles, data, cfg):
         fen, move = make_pre_move(row)
         task_name = rating_to_level(row["Rating"])
 
-        if found_counter[task_name] < cfg.N_sample_rating:
+        if found_counter[task_name] < config.N_sample_rating:
             prefix = f"You are given a chess position in FEN: {fen}.\n"
             task_description = "Find the best move for the side to play.\n"
             suffix = "Use UCI notation (e.g., FORMAT_EXAMPLE_PLACEHOLDER) for the final answer."
@@ -109,7 +109,7 @@ def find_puzzles_by_rating(unique_puzzles, data, cfg):
             found.append(sample)
             unique_puzzles.add(puzzle_id)
 
-        if all(count >= cfg.N_sample_rating for count in found_counter.values()):
+        if all(count >= config.N_sample_rating for count in found_counter.values()):
             break
 
     print(found_counter, flush=True)
@@ -117,15 +117,15 @@ def find_puzzles_by_rating(unique_puzzles, data, cfg):
     return found, unique_puzzles
 
 
-def find_puzzles_by_theme(unique_puzzles, data, cfg):
-    """Collect cfg.N_sample_theme best-move tasks per curated tactical theme.
+def find_puzzles_by_theme(unique_puzzles, data, config):
+    """Collect config.N_sample_theme best-move tasks per curated tactical theme.
 
     Same filtering as the rating pass. A puzzle usually carries several theme tags; it is
     assigned to the first still-unfilled tag it intersects (iteration order of the set —
     fixed by PYTHONHASHSEED via seed_everything), recorded as ``primary_theme`` in metadata.
     """
-    with open(cfg.all_themes_path) as f:
-        all_themes_to_include = set(json.load(f))
+    with open(config.all_themes_path) as themes_file:
+        all_themes_to_include = set(json.load(themes_file))
 
     all_themes_to_include = set(all_themes_to_include)
     found_counter = {theme: 0 for theme in all_themes_to_include}
@@ -137,9 +137,9 @@ def find_puzzles_by_theme(unique_puzzles, data, cfg):
         pv_length = len(row["Moves"].split(" "))
 
         if (
-            rating_deviation > cfg.max_rating_deviation
-            or popularity < cfg.min_popularity
-            or pv_length > cfg.max_pv_length
+            rating_deviation > config.max_rating_deviation
+            or popularity < config.min_popularity
+            or pv_length > config.max_pv_length
         ):
             continue
 
@@ -154,7 +154,7 @@ def find_puzzles_by_theme(unique_puzzles, data, cfg):
             continue
 
         for primary_theme in intersecting_themes:
-            if found_counter[primary_theme] < cfg.N_sample_theme:
+            if found_counter[primary_theme] < config.N_sample_theme:
                 prefix = f"You are given a chess position in FEN: {fen}.\n"
                 task_description = "Find the best move for the side to play.\n"
                 suffix = "Use UCI notation (e.g., FORMAT_EXAMPLE_PLACEHOLDER) for the final answer."
@@ -184,7 +184,7 @@ def find_puzzles_by_theme(unique_puzzles, data, cfg):
                 unique_puzzles.add(puzzle_id)
                 break
 
-        if all(count >= cfg.N_sample_theme for count in found_counter.values()):
+        if all(count >= config.N_sample_theme for count in found_counter.values()):
             break
 
     print(found_counter, flush=True)
@@ -210,16 +210,16 @@ def parse_args():
 
 def main():
     """Generate the Short Tactics benchmark file: rating-stratified pass, then theme pass."""
-    cfg = parse_args()
-    seed_everything(cfg.seed)
-    data = read_puzzles(cfg.puzzle_path)
+    config = parse_args()
+    seed_everything(config.seed)
+    data = read_puzzles(config.puzzle_path)
 
     unique_puzzles = set()
-    found_rating, unique_puzzles = find_puzzles_by_rating(unique_puzzles, data, cfg)
-    found_theme = find_puzzles_by_theme(unique_puzzles, data, cfg)
+    found_rating, unique_puzzles = find_puzzles_by_rating(unique_puzzles, data, config)
+    found_theme = find_puzzles_by_theme(unique_puzzles, data, config)
     found = found_rating + found_theme
 
-    save_tasks(found, "short_tactics.jsonl", cfg)
+    save_tasks(found, "short_tactics.jsonl", config)
 
 
 if __name__ == "__main__":

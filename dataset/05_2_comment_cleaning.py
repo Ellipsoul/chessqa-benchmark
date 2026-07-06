@@ -87,8 +87,8 @@ def _setup_env(
 
 def load_comments(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
     """Load the stage-1 JSON array, optionally truncated to max_records for quick test runs."""
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+    with open(path, encoding="utf-8") as input_file:
+        data = json.load(input_file)
     if not isinstance(data, list):
         raise ValueError("Input file must be a JSON array of objects")
     if max_records and max_records > 0:
@@ -99,8 +99,8 @@ def load_comments(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
 def save_comments(path: Path, items: list[dict[str, Any]]) -> None:
     """Write the cleaned records as a pretty-printed JSON array, creating parent dirs."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
+    with open(path, "w", encoding="utf-8") as output_file:
+        json.dump(items, output_file, ensure_ascii=False, indent=2)
 
 
 def split_name(name: str) -> tuple[str, str, list[str]]:
@@ -111,7 +111,7 @@ def split_name(name: str) -> tuple[str, str, list[str]]:
     cleaned = re.sub(r"[\\/]+", " ", name).strip()
     # Handle comma format: Last, First Middle
     if "," in cleaned:
-        last, rest = [p.strip() for p in cleaned.split(",", 1)]
+        last, rest = [name_part.strip() for name_part in cleaned.split(",", 1)]
         first = rest.split()[0] if rest else ""
     else:
         parts = cleaned.split()
@@ -119,7 +119,7 @@ def split_name(name: str) -> tuple[str, str, list[str]]:
             first, last = parts[0], parts[0]
         else:
             first, last = parts[0], parts[-1]
-    tokens = [t for t in re.split(r"[^A-Za-z']+", cleaned) if t]
+    tokens = [token for token in re.split(r"[^A-Za-z']+", cleaned) if token]
     return first, last, tokens
 
 
@@ -131,21 +131,21 @@ def normalize_weird_symbols(text: str) -> str:
     """
     if not text:
         return text
-    rep = {
+    figurine_replacements = {
         "\ue025": "Q",  # sometimes serialized as U+E025 ()
         "\ue026": "R",  # ()
         "\ue027": "B",  # ()
         "\ue028": "N",  # ()
         "\ue024": "K",
     }
-    out = text
-    for k, v in rep.items():
-        out = out.replace(k, v)
+    normalized_text = text
+    for figurine, letter in figurine_replacements.items():
+        normalized_text = normalized_text.replace(figurine, letter)
     # Remove zero-width and directional formatting chars
-    out = re.sub(r"[\u200B-\u200F\u202A-\u202E]", "", out)
+    normalized_text = re.sub(r"[\u200B-\u200F\u202A-\u202E]", "", normalized_text)
     # Normalize NBSP to space
-    out = out.replace("\u00a0", " ")
-    return out
+    normalized_text = normalized_text.replace("\u00a0", " ")
+    return normalized_text
 
 
 def strip_pgn_markup(text: str) -> str:
@@ -159,34 +159,34 @@ def strip_pgn_markup(text: str) -> str:
     """
     if not text:
         return text
-    out = text
+    stripped_text = text
     # Remove ChessBase/PGN inline tags like [%csl Rc4], [%cal Ya1a8], [%eval 0.34]
-    out = re.sub(r"\[%[^\]]*\]", "", out)
+    stripped_text = re.sub(r"\[%[^\]]*\]", "", stripped_text)
     # Remove numeric annotation glyphs like $1 $3, anywhere in text
-    out = re.sub(r"\$\d+", "", out)
+    stripped_text = re.sub(r"\$\d+", "", stripped_text)
     # Reformat PGN move prefixes so they do not leak raw notation
-    out = re.sub(r"(?<!\d)(\d+)\.{3,}(?=[A-Za-z])", r"\1 ", out)
-    out = re.sub(r"(?<!\d)(\d+)\.{3,}(?=[0O])", r"\1 ", out)
-    out = re.sub(r"(?<!\d)(\d+)\.(?=[A-Za-z])", r"\1 ", out)
-    out = re.sub(r"(?<=\d)\.{3,}", "", out)
-    out = re.sub(r"\.{3,}(?=[A-Za-z])", " ", out)
-    out = re.sub(r"(?<!\S)(\d+)\.{3,}(?=\s)", r"\1", out)
-    out = re.sub(r"(?<!\S)(\d+)\.(?=\s)", r"\1", out)
-    out = re.sub(r"(?<!\S)\d+\.{3,}(?=$|[.,;:!?])", "", out)
-    out = re.sub(r"(?<!\S)\d+\.(?=$|[.,;:!?])", "", out)
-    out = re.sub(r"(?<=\()(\d+)\.{3,}(?=\s)", r"\1", out)
-    out = re.sub(r"(?<=\()(\d+)\.(?=\s)", r"\1", out)
-    out = re.sub(r"(?<=\()\d+\.{3,}(?=\)|$)", "", out)
-    out = re.sub(r"(?<=\()\d+\.(?=\)|$)", "", out)
+    stripped_text = re.sub(r"(?<!\d)(\d+)\.{3,}(?=[A-Za-z])", r"\1 ", stripped_text)
+    stripped_text = re.sub(r"(?<!\d)(\d+)\.{3,}(?=[0O])", r"\1 ", stripped_text)
+    stripped_text = re.sub(r"(?<!\d)(\d+)\.(?=[A-Za-z])", r"\1 ", stripped_text)
+    stripped_text = re.sub(r"(?<=\d)\.{3,}", "", stripped_text)
+    stripped_text = re.sub(r"\.{3,}(?=[A-Za-z])", " ", stripped_text)
+    stripped_text = re.sub(r"(?<!\S)(\d+)\.{3,}(?=\s)", r"\1", stripped_text)
+    stripped_text = re.sub(r"(?<!\S)(\d+)\.(?=\s)", r"\1", stripped_text)
+    stripped_text = re.sub(r"(?<!\S)\d+\.{3,}(?=$|[.,;:!?])", "", stripped_text)
+    stripped_text = re.sub(r"(?<!\S)\d+\.(?=$|[.,;:!?])", "", stripped_text)
+    stripped_text = re.sub(r"(?<=\()(\d+)\.{3,}(?=\s)", r"\1", stripped_text)
+    stripped_text = re.sub(r"(?<=\()(\d+)\.(?=\s)", r"\1", stripped_text)
+    stripped_text = re.sub(r"(?<=\()\d+\.{3,}(?=\)|$)", "", stripped_text)
+    stripped_text = re.sub(r"(?<=\()\d+\.(?=\)|$)", "", stripped_text)
     # Remove stray trailing move counters left after stripping notation (e.g., '. 14' at sentence end)
-    out = re.sub(r"([.!?])\s*\d+$", r"\1", out)
-    out = re.sub(r"(\))\s*\d+$", r"\1", out)
+    stripped_text = re.sub(r"([.!?])\s*\d+$", r"\1", stripped_text)
+    stripped_text = re.sub(r"(\))\s*\d+$", r"\1", stripped_text)
     # Remove any remaining Private Use Area characters (except the ones already mapped earlier)
     # Do this after normalize_weird_symbols so known figurines become letters first.
-    out = re.sub(r"[\ue000-\uf8ff]", "", out)
+    stripped_text = re.sub(r"[\ue000-\uf8ff]", "", stripped_text)
     # Collapse whitespace introduced by removals
-    out = re.sub(r"\s+", " ", out).strip()
-    return out
+    stripped_text = re.sub(r"\s+", " ", stripped_text).strip()
+    return stripped_text
 
 
 def _normalize_name_for_eq(name: str) -> str:
@@ -197,13 +197,13 @@ def _normalize_name_for_eq(name: str) -> str:
 def _annotator_side(item: dict[str, Any]) -> str | None:
     """Return 'White' or 'Black' if the annotator matches exactly that player; else None."""
     meta = item.get("meta", {}) or {}
-    annot = meta.get("Annotator") or item.get("annotator") or ""
+    annotator_name = meta.get("Annotator") or item.get("annotator") or ""
     white = item.get("white_player", "")
     black = item.get("black_player", "")
-    a = _normalize_name_for_eq(annot)
-    if a and a == _normalize_name_for_eq(white):
+    normalized_annotator = _normalize_name_for_eq(annotator_name)
+    if normalized_annotator and normalized_annotator == _normalize_name_for_eq(white):
         return "White"
-    if a and a == _normalize_name_for_eq(black):
+    if normalized_annotator and normalized_annotator == _normalize_name_for_eq(black):
         return "Black"
     return None
 
@@ -227,10 +227,10 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
     # NOTE (upstream dead code, kept as-is): these sorted() results are discarded — the alias
     # lists were presumably once embedded in the prompt. The actual alias substitution happens
     # deterministically after inference via apply_alias_replacements in perform_cleaning.
-    sorted({t for t in [white, w_first, w_last] + w_tokens if t}, key=lambda s: (-len(s), s.lower()))
-    sorted({t for t in [black, b_first, b_last] + b_tokens if t}, key=lambda s: (-len(s), s.lower()))
+    sorted({name_variant for name_variant in [white, w_first, w_last] + w_tokens if name_variant}, key=lambda name_text: (-len(name_text), name_text.lower()))
+    sorted({name_variant for name_variant in [black, b_first, b_last] + b_tokens if name_variant}, key=lambda name_text: (-len(name_text), name_text.lower()))
 
-    sys = (
+    system_prompt = (
         "You are a precise data cleaner for chess commentary. "
         "Given a comment and the players' names, output EXACTLY one of:"
         "\n- The cleaned comment text (no quotes)"
@@ -248,7 +248,7 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
     side = _annotator_side(item)
     if side in ("White", "Black"):
         possessive = "White's" if side == "White" else "Black's"
-        sys += (
+        system_prompt += (
             f"\n5) Special case: The annotator is the {side} player. "
             f"If first-person pronouns occur (I, me, my, mine, myself, I'm, I've, I'd, I'll), rewrite them to refer to {side}: "
             f"I/me/myself→{side}, my/mine→{possessive}, I'm→{side} is, I've→{side} has, I'd→{side} would, I'll→{side} will."
@@ -268,7 +268,7 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
         "Output strictly one line: cleaned text or SKIP."
     )
 
-    usr = (
+    user_prompt = (
         f"Comment: {comment}\n"
         f"White player (full): {white}\n"
         f"Black player (full): {black}\n"
@@ -278,7 +278,7 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
     )
 
     return [
-        {"role": "system", "content": sys},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": few_shot_example_1},
         {"role": "assistant", "content": "SKIP"},
         {"role": "user", "content": few_shot_example_2},
@@ -286,7 +286,7 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
             "role": "assistant",
             "content": "A huge blunder by Black which loses instantly. I think he missed that the c8-bishop is unprotected.",
         },
-        {"role": "user", "content": usr},
+        {"role": "user", "content": user_prompt},
     ]
 
 
@@ -302,26 +302,26 @@ def sanitize_llm_output(text: str) -> str:
     if text is None:
         return "SKIP"
 
-    t = text.strip()
+    working_text = text.strip()
     # Remove code fences/backticks
-    t = re.sub(r"^```[\s\S]*?```$", lambda m: m.group(0).strip("`\n "), t, flags=re.M)
-    t = t.strip("` ")
+    working_text = re.sub(r"^```[\s\S]*?```$", lambda fence_match: fence_match.group(0).strip("`\n "), working_text, flags=re.M)
+    working_text = working_text.strip("` ")
 
     # Remove <think> blocks (open-ended or closed)
-    t = re.sub(r"(?is)<think>.*?(</think>|$)", "", t).strip()
+    working_text = re.sub(r"(?is)<think>.*?(</think>|$)", "", working_text).strip()
 
     # Split by lines (keep order)
-    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    lines = [line.strip() for line in working_text.splitlines() if line.strip()]
     if not lines:
         return "SKIP"
 
     # If any line is exactly SKIP
-    for ln in lines:
-        if ln.strip().upper() == "SKIP":
+    for line in lines:
+        if line.strip().upper() == "SKIP":
             return "SKIP"
 
     # Prefer the last quoted segment among all text
-    quoted = re.findall(r'"([^"\n]+)"', t)
+    quoted = re.findall(r'"([^"\n]+)"', working_text)
     candidate = None
     candidate = quoted[-1].strip() if quoted else lines[-1]
 
@@ -343,20 +343,20 @@ def sanitize_llm_output(text: str) -> str:
 def _sorted_aliases(name: str) -> list[str]:
     """All surface forms of a player name (full/first/last/tokens), longest first so
     'Aronian, Levon' is replaced before bare 'Levon'."""
-    first, last, toks = split_name(name)
-    aliases = sorted({t for t in [name, first, last] + toks if t}, key=lambda s: (-len(s), s.lower()))
+    first, last, tokens = split_name(name)
+    aliases = sorted({token for token in [name, first, last] + tokens if token}, key=lambda alias: (-len(alias), alias.lower()))
     return aliases
 
 
 def apply_alias_replacements(text: str, aliases: list[str], replacement: str) -> str:
     """Deterministic belt-and-braces pass replacing any remaining player-name aliases the
     LLM missed (case-insensitive, bounded so 'So' won't match inside 'Some')."""
-    out = text
+    replaced_text = text
     for alias in aliases:
         # Word-ish boundaries: do not match inside larger alpha sequences
-        pat = re.compile(rf"(?i)(?<![A-Za-z]){re.escape(alias)}(?![A-Za-z])")
-        out = pat.sub(replacement, out)
-    return out
+        alias_pattern = re.compile(rf"(?i)(?<![A-Za-z]){re.escape(alias)}(?![A-Za-z])")
+        replaced_text = alias_pattern.sub(replacement, replaced_text)
+    return replaced_text
 
 
 def apply_pronoun_replacements(text: str, side: str) -> str:
@@ -364,7 +364,7 @@ def apply_pronoun_replacements(text: str, side: str) -> str:
     if not side or not text:
         return text
     repl_side = "White" if side.lower() == "white" else "Black"
-    out = text
+    replaced_text = text
     # Contractions
     patterns = [
         (r"(?i)\bI'm\b", f"{repl_side} is"),
@@ -380,9 +380,9 @@ def apply_pronoun_replacements(text: str, side: str) -> str:
         (r"(?i)\bme\b", repl_side),
         (r"(?i)\bI\b", repl_side),
     ]
-    for pat, rep in patterns:
-        out = re.sub(pat, rep, out)
-    return out
+    for pattern, replacement in patterns:
+        replaced_text = re.sub(pattern, replacement, replaced_text)
+    return replaced_text
 
 
 def perform_cleaning(
@@ -424,43 +424,43 @@ def perform_cleaning(
         llm_kwargs["dtype"] = dtype
 
     print("=== Initialize vLLM model ===")
-    for k, v in llm_kwargs.items():
-        print(f"{k}: {v}")
+    for kwarg_name, kwarg_value in llm_kwargs.items():
+        print(f"{kwarg_name}: {kwarg_value}")
     llm = LLM(**llm_kwargs)
 
     sampling = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=int(max_tokens))
 
     outputs: list[tuple[dict[str, Any], str]] = []
-    t0 = time.time()
-    for i in range(0, len(records), batch_size):
-        batch = records[i : i + batch_size]
-        prompts = [build_messages(r) for r in batch]
+    start_time = time.time()
+    for batch_start in range(0, len(records), batch_size):
+        batch = records[batch_start : batch_start + batch_size]
+        prompts = [build_messages(record) for record in batch]
         chat_kwargs: dict[str, Any] = {}
         if enable_thinking is not None:
             chat_kwargs["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
         try:
-            outs = llm.chat(prompts, sampling, **chat_kwargs)
+            batch_outputs = llm.chat(prompts, sampling, **chat_kwargs)
         except Exception:
             # Fallback without template kwargs (for models that don't accept it)
-            outs = llm.chat(prompts, sampling)
-        for rec, out in zip(batch, outs, strict=False):
-            text = out.outputs[0].text if out.outputs and out.outputs[0] else ""
+            batch_outputs = llm.chat(prompts, sampling)
+        for record, model_output in zip(batch, batch_outputs, strict=False):
+            text = model_output.outputs[0].text if model_output.outputs and model_output.outputs[0] else ""
             cleaned = sanitize_llm_output(text)
             # Post-ensure player substitutions, in case the LLM missed any exact alias surface forms
-            w_aliases = _sorted_aliases(rec.get("white_player", ""))
-            b_aliases = _sorted_aliases(rec.get("black_player", ""))
+            w_aliases = _sorted_aliases(record.get("white_player", ""))
+            b_aliases = _sorted_aliases(record.get("black_player", ""))
             if cleaned.upper() != "SKIP":
                 cleaned = normalize_weird_symbols(cleaned)
                 cleaned = strip_pgn_markup(cleaned)
                 cleaned = apply_alias_replacements(cleaned, w_aliases, "White")
                 cleaned = apply_alias_replacements(cleaned, b_aliases, "Black")
                 # If annotator is exactly a player, normalize first-person pronouns
-                side2 = _annotator_side(rec)
-                if side2 in ("White", "Black"):
-                    cleaned = apply_pronoun_replacements(cleaned, side2)
-            outputs.append((rec, cleaned))
-    dt = time.time() - t0
-    print(f"Cleaning completed: {len(records)} records in {dt:.1f}s")
+                annotator_player_side = _annotator_side(record)
+                if annotator_player_side in ("White", "Black"):
+                    cleaned = apply_pronoun_replacements(cleaned, annotator_player_side)
+            outputs.append((record, cleaned))
+    elapsed_seconds = time.time() - start_time
+    print(f"Cleaning completed: {len(records)} records in {elapsed_seconds:.1f}s")
     return outputs
 
 
@@ -473,36 +473,36 @@ def main() -> int:
     default_input = Path("../../data/mid/comment_dataset.json")
     default_output = Path("../../data/mid/comment_dataset.cleaned.json")
 
-    ap = argparse.ArgumentParser(description="Offline vLLM cleaning for chess comments")
-    ap.add_argument("--input", type=Path, default=default_input, help="Input JSON array file of comment objects")
-    ap.add_argument("--output", type=Path, default=default_output, help="Output JSON file for cleaned comments")
-    ap.add_argument(
+    argument_parser = argparse.ArgumentParser(description="Offline vLLM cleaning for chess comments")
+    argument_parser.add_argument("--input", type=Path, default=default_input, help="Input JSON array file of comment objects")
+    argument_parser.add_argument("--output", type=Path, default=default_output, help="Output JSON file for cleaned comments")
+    argument_parser.add_argument(
         "--model",
         type=str,
         default="Qwen/Qwen3-30B-A3B-Instruct-2507",
         help="HuggingFace model ID or local path for vLLM",
     )
-    ap.add_argument("--batch-size", type=int, default=1024)
-    ap.add_argument("--max-records", type=int, default=0, help="Limit records for a quick run (0 = all)")
-    ap.add_argument("--max-model-len", type=int, default=8192)
-    ap.add_argument("--max-tokens", type=int, default=128, help="Max new tokens for cleaning output")
-    ap.add_argument("--tensor-parallel-size", type=int, default=2)
-    ap.add_argument("--gpu-memory-utilization", type=float, default=0.80)
-    ap.add_argument(
+    argument_parser.add_argument("--batch-size", type=int, default=1024)
+    argument_parser.add_argument("--max-records", type=int, default=0, help="Limit records for a quick run (0 = all)")
+    argument_parser.add_argument("--max-model-len", type=int, default=8192)
+    argument_parser.add_argument("--max-tokens", type=int, default=128, help="Max new tokens for cleaning output")
+    argument_parser.add_argument("--tensor-parallel-size", type=int, default=2)
+    argument_parser.add_argument("--gpu-memory-utilization", type=float, default=0.80)
+    argument_parser.add_argument(
         "--dtype", type=str, default=None, choices=[None, "auto", "float16", "bfloat16", "float32"], nargs="?"
     )
-    ap.add_argument("--attention-backend", type=str, default=None, choices=[None, "FLASH_ATTN", "XFORMERS"], nargs="?")
-    gfi = ap.add_mutually_exclusive_group()
-    gfi.add_argument("--use-flashinfer", dest="use_flashinfer", action="store_true")
-    gfi.add_argument("--no-flashinfer", dest="use_flashinfer", action="store_false")
-    ap.set_defaults(use_flashinfer=False)  # default OFF to bypass JIT
+    argument_parser.add_argument("--attention-backend", type=str, default=None, choices=[None, "FLASH_ATTN", "XFORMERS"], nargs="?")
+    flashinfer_group = argument_parser.add_mutually_exclusive_group()
+    flashinfer_group.add_argument("--use-flashinfer", dest="use_flashinfer", action="store_true")
+    flashinfer_group.add_argument("--no-flashinfer", dest="use_flashinfer", action="store_false")
+    argument_parser.set_defaults(use_flashinfer=False)  # default OFF to bypass JIT
     # Thinking control (default off to avoid <think> blocks)
-    gthink = ap.add_mutually_exclusive_group()
-    gthink.add_argument("--enable-thinking", dest="enable_thinking", action="store_true")
-    gthink.add_argument("--disable-thinking", dest="enable_thinking", action="store_false")
-    ap.set_defaults(enable_thinking=False)
+    thinking_group = argument_parser.add_mutually_exclusive_group()
+    thinking_group.add_argument("--enable-thinking", dest="enable_thinking", action="store_true")
+    thinking_group.add_argument("--disable-thinking", dest="enable_thinking", action="store_false")
+    argument_parser.set_defaults(enable_thinking=False)
 
-    args = ap.parse_args()
+    args = argument_parser.parse_args()
 
     records = load_comments(args.input, args.max_records)
     pairs = perform_cleaning(
@@ -521,13 +521,13 @@ def main() -> int:
 
     cleaned_items: list[dict[str, Any]] = []
     skipped = 0
-    for rec, out_text in pairs:
+    for record, out_text in pairs:
         if out_text.strip().upper() == "SKIP":
             skipped += 1
             continue
         # Replace the comment with cleaned text
-        new_item = dict(rec)
-        orig = rec.get("comment", "")
+        new_item = dict(record)
+        orig = record.get("comment", "")
         new_item["original_comment"] = orig
         # Normalize symbols in the final output too (idempotent)
         final_clean = normalize_weird_symbols(out_text)

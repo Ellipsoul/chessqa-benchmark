@@ -266,14 +266,14 @@ def _can_use_line(piece_type, line_type):
 
 def _yield_rank_lines():
     """Yield the 8 ranks as ("rank", [squares a-file to h-file]) for battery scanning."""
-    for r in range(8):
-        yield "rank", [chess.square(f, r) for f in range(8)]
+    for rank_index in range(8):
+        yield "rank", [chess.square(file_index, rank_index) for file_index in range(8)]
 
 
 def _yield_file_lines():
     """Yield the 8 files as ("file", [squares rank 1 to 8]) for battery scanning."""
-    for f in range(8):
-        yield "file", [chess.square(f, r) for r in range(8)]
+    for file_index in range(8):
+        yield "file", [chess.square(file_index, rank_index) for rank_index in range(8)]
 
 
 def _yield_diag_lines():
@@ -282,40 +282,40 @@ def _yield_diag_lines():
     Four loops cover: NE-going diagonals starting on rank 1, NE-going starting on the a-file,
     NW-going starting on rank 1, and NW-going starting on the h-file.
     """
-    for f0 in range(8):
+    for start_file_index in range(8):
         line = []
-        f, r = f0, 0
-        while 0 <= f <= 7 and 0 <= r <= 7:
-            line.append(chess.square(f, r))
-            f += 1
-            r += 1
+        file_index, rank_index = start_file_index, 0
+        while 0 <= file_index <= 7 and 0 <= rank_index <= 7:
+            line.append(chess.square(file_index, rank_index))
+            file_index += 1
+            rank_index += 1
         if len(line) >= 2:
             yield "diagonal", line
-    for r0 in range(1, 8):
+    for start_rank_index in range(1, 8):
         line = []
-        f, r = 0, r0
-        while 0 <= f <= 7 and 0 <= r <= 7:
-            line.append(chess.square(f, r))
-            f += 1
-            r += 1
+        file_index, rank_index = 0, start_rank_index
+        while 0 <= file_index <= 7 and 0 <= rank_index <= 7:
+            line.append(chess.square(file_index, rank_index))
+            file_index += 1
+            rank_index += 1
         if len(line) >= 2:
             yield "diagonal", line
-    for f0 in range(7, -1, -1):
+    for start_file_index in range(7, -1, -1):
         line = []
-        f, r = f0, 0
-        while 0 <= f <= 7 and 0 <= r <= 7:
-            line.append(chess.square(f, r))
-            f -= 1
-            r += 1
+        file_index, rank_index = start_file_index, 0
+        while 0 <= file_index <= 7 and 0 <= rank_index <= 7:
+            line.append(chess.square(file_index, rank_index))
+            file_index -= 1
+            rank_index += 1
         if len(line) >= 2:
             yield "diagonal", line
-    for r0 in range(1, 8):
+    for start_rank_index in range(1, 8):
         line = []
-        f, r = 7, r0
-        while 0 <= f <= 7 and 0 <= r <= 7:
-            line.append(chess.square(f, r))
-            f -= 1
-            r += 1
+        file_index, rank_index = 7, start_rank_index
+        while 0 <= file_index <= 7 and 0 <= rank_index <= 7:
+            line.append(chess.square(file_index, rank_index))
+            file_index -= 1
+            rank_index += 1
         if len(line) >= 2:
             yield "diagonal", line
 
@@ -330,49 +330,49 @@ def detect_batteries(board):
     """
     batteries = []
     for line_type, line in list(_yield_rank_lines()) + list(_yield_file_lines()) + list(_yield_diag_lines()):
-        i = 0
-        while i < len(line):
-            sq = line[i]
-            p = board.piece_at(sq)
-            if not p or p.piece_type not in (chess.BISHOP, chess.ROOK, chess.QUEEN):
-                i += 1
+        line_position = 0
+        while line_position < len(line):
+            anchor_square = line[line_position]
+            anchor_piece = board.piece_at(anchor_square)
+            if not anchor_piece or anchor_piece.piece_type not in (chess.BISHOP, chess.ROOK, chess.QUEEN):
+                line_position += 1
                 continue
-            color = p.color
-            if not _can_use_line(p.piece_type, line_type):
-                i += 1
+            color = anchor_piece.color
+            if not _can_use_line(anchor_piece.piece_type, line_type):
+                line_position += 1
                 continue
             # Extend the run: skip empty squares; a compatible friendly slider joins the run,
             # any other piece ends it.
-            run = [sq]
-            j = i + 1
-            while j < len(line):
-                sqj = line[j]
-                pj = board.piece_at(sqj)
-                if pj is None:
-                    j += 1
+            battery_run = [anchor_square]
+            scan_position = line_position + 1
+            while scan_position < len(line):
+                scan_square = line[scan_position]
+                scan_piece = board.piece_at(scan_square)
+                if scan_piece is None:
+                    scan_position += 1
                     continue
                 if (
-                    pj.color == color
-                    and pj.piece_type in (chess.BISHOP, chess.ROOK, chess.QUEEN)
-                    and _can_use_line(pj.piece_type, line_type)
+                    scan_piece.color == color
+                    and scan_piece.piece_type in (chess.BISHOP, chess.ROOK, chess.QUEEN)
+                    and _can_use_line(scan_piece.piece_type, line_type)
                 ):
-                    run.append(sqj)
-                    j += 1
-                    while j < len(line) and board.piece_at(line[j]) is None:
-                        j += 1
+                    battery_run.append(scan_square)
+                    scan_position += 1
+                    while scan_position < len(line) and board.piece_at(line[scan_position]) is None:
+                        scan_position += 1
                     continue
                 break
-            if len(run) >= 2:
-                batteries.append([chess.square_name(x) for x in run])
-            i = j if j > i else i + 1
-    uniq = []
+            if len(battery_run) >= 2:
+                batteries.append([chess.square_name(battery_square) for battery_square in battery_run])
+            line_position = scan_position if scan_position > line_position else line_position + 1
+    unique_batteries = []
     seen = set()
     for group in batteries:
-        key = tuple(group)
-        if key not in seen:
-            seen.add(key)
-            uniq.append(group)
-    return uniq
+        battery_key = tuple(group)
+        if battery_key not in seen:
+            seen.add(battery_key)
+            unique_batteries.append(group)
+    return unique_batteries
 
 
 def generate_battery_task(board, found_counter, puzzle_id):
@@ -384,7 +384,7 @@ def generate_battery_task(board, found_counter, puzzle_id):
     task_description = "Identify every battery (2 or more aligned long-range pieces, e.g, RR/RQ/QQ on files or ranks, BQ/BB/QQ on diagonals, of the same color with no pieces between)."
     task_description += " Report each battery as the squares of the pieces in alphabetical order (a>h, 1>8), using '>' to separate squares in a battery and ',' to separate multiple batteries, e.g., FORMAT_EXAMPLE_PLACEHOLDER.\n"
     suffix = "If more than one, separate with a comma and a space."
-    answer_parts = [">".join(g) for g in batteries]
+    answer_parts = [">".join(battery_group) for battery_group in batteries]
     correct_answer = ", ".join(answer_parts)
     assert correct_answer, "Should have at least one battery"
     return ChessQuestionAnsweringTask(
@@ -445,13 +445,13 @@ def detect_discovered_check_moves(board):
     """
     results = []
     color = board.turn
-    opp = not color
-    king_sq_before = board.king(opp)
-    for mv in list(board.legal_moves):
-        from_sq = mv.from_square
-        to_sq = mv.to_square
-        pre = board.copy()
-        board.push(mv)
+    opponent_color = not color
+    king_sq_before = board.king(opponent_color)
+    for move in list(board.legal_moves):
+        from_sq = move.from_square
+        to_sq = move.to_square
+        pre_move_board = board.copy()
+        board.push(move)
         try:
             if not board.is_check():
                 continue
@@ -463,13 +463,21 @@ def detect_discovered_check_moves(board):
                 if checker_sq == to_sq:
                     # This is a direct check, not discovered
                     continue
-                cp = board.piece_at(checker_sq)
-                if cp is None or cp.color != color or cp.piece_type not in (chess.ROOK, chess.BISHOP, chess.QUEEN):
+                checker_piece = board.piece_at(checker_sq)
+                if (
+                    checker_piece is None
+                    or checker_piece.color != color
+                    or checker_piece.piece_type not in (chess.ROOK, chess.BISHOP, chess.QUEEN)
+                ):
                     continue
-                ray = get_ray_between(checker_sq, king_sq_before)
-                if from_sq not in ray:
+                checker_to_king_ray = get_ray_between(checker_sq, king_sq_before)
+                if from_sq not in checker_to_king_ray:
                     continue
-                other_blockers = [s for s in ray if s != from_sq and pre.piece_at(s) is not None]
+                other_blockers = [
+                    ray_square
+                    for ray_square in checker_to_king_ray
+                    if ray_square != from_sq and pre_move_board.piece_at(ray_square) is not None
+                ]
                 if other_blockers:
                     continue
                 # This is a discovered check
@@ -495,7 +503,7 @@ def generate_discovered_check_task(board, found_counter, puzzle_id):
     )
     task_description += " Report each as UCI move (e.g., FORMAT_EXAMPLE_PLACEHOLDER).\n"
     suffix = "If more than one, separate with a comma and a space."
-    answer_parts = [f"{f}{t}" for (f, t, _) in moves]
+    answer_parts = [f"{from_square}{to_square}" for (from_square, to_square, _) in moves]
     correct_answer = ", ".join(answer_parts)
     assert correct_answer, "Should have at least one discovered check"
     return ChessQuestionAnsweringTask(
@@ -514,10 +522,10 @@ def generate_discovered_check_task(board, found_counter, puzzle_id):
 def detect_double_check_moves(board):
     """Find moves that give double check (>= 2 checkers afterwards): (from, to, checkers) triples."""
     results = []
-    for mv in list(board.legal_moves):
-        from_sq = mv.from_square
-        to_sq = mv.to_square
-        board.push(mv)
+    for move in list(board.legal_moves):
+        from_sq = move.from_square
+        to_sq = move.to_square
+        board.push(move)
         try:
             if not board.is_check():
                 continue
@@ -527,19 +535,19 @@ def detect_double_check_moves(board):
                     (
                         chess.square_name(from_sq),
                         chess.square_name(to_sq),
-                        sorted(chess.square_name(s) for s in checkers),
+                        sorted(chess.square_name(checker_square) for checker_square in checkers),
                     )
                 )
         finally:
             board.pop()
-    uniq = []
+    unique_results = []
     seen = set()
-    for f, t, cs in results:
-        key = (f, t, tuple(cs))
-        if key not in seen:
-            seen.add(key)
-            uniq.append((f, t, cs))
-    return uniq
+    for from_square, to_square, checker_squares in results:
+        dedup_key = (from_square, to_square, tuple(checker_squares))
+        if dedup_key not in seen:
+            seen.add(dedup_key)
+            unique_results.append((from_square, to_square, checker_squares))
+    return unique_results
 
 
 def generate_double_check_task(board, found_counter, puzzle_id):
@@ -551,7 +559,7 @@ def generate_double_check_task(board, found_counter, puzzle_id):
     task_description = "Identify all moves that deliver a double check (two pieces give check after the move)."
     task_description += " Report each as UCI move (e.g., FORMAT_EXAMPLE_PLACEHOLDER).\n"
     suffix = "If more than one, separate with a comma and a space."
-    answer_parts = [f"{f}{t}" for (f, t, cs) in moves]
+    answer_parts = [f"{from_square}{to_square}" for (from_square, to_square, _checker_squares) in moves]
     correct_answer = ", ".join(answer_parts)
     assert correct_answer, "Should have at least one double check"
     return ChessQuestionAnsweringTask(
@@ -567,8 +575,8 @@ def generate_double_check_task(board, found_counter, puzzle_id):
     )
 
 
-def find_tactical_tasks(unique_positions, data, cfg):
-    """Drive the six motif generators until each has cfg.N_sample tasks.
+def find_tactical_tasks(unique_positions, data, config):
+    """Drive the six motif generators until each has config.N_sample tasks.
 
     Same driver pattern as 01_structural: one task max per puzzle position (first generator
     that fires wins, then ``break``), with ``unique_positions`` shared across generators to
@@ -592,7 +600,7 @@ def find_tactical_tasks(unique_positions, data, cfg):
             continue
         board = chess.Board(row["FEN"])
         for task_type, task_generator in task_generators.items():
-            if found_counter[task_type] >= cfg.N_sample:
+            if found_counter[task_type] >= config.N_sample:
                 continue
             task = task_generator(board, found_counter, puzzle_id)
             if task:
@@ -601,7 +609,7 @@ def find_tactical_tasks(unique_positions, data, cfg):
                 unique_positions.add(puzzle_id)
                 print(f"Found {task.task_type} in puzzle {puzzle_id}, total found: {found_counter}")
                 break
-        if all([found_counter[t] >= cfg.N_sample for t in found_counter]):
+        if all([found_counter[task_name] >= config.N_sample for task_name in found_counter]):
             break
     return found
 
@@ -618,12 +626,12 @@ def parse_args():
 
 def main():
     """Generate the Motifs benchmark file: seed, load puzzles, run detectors, write JSONL."""
-    cfg = parse_args()
-    seed_everything(cfg.seed)
-    data = read_puzzles(cfg.puzzle_path)
+    config = parse_args()
+    seed_everything(config.seed)
+    data = read_puzzles(config.puzzle_path)
     unique_positions = set()
-    found = find_tactical_tasks(unique_positions, data, cfg)
-    save_tasks(found, "motifs.jsonl", cfg)
+    found = find_tactical_tasks(unique_positions, data, config)
+    save_tasks(found, "motifs.jsonl", config)
 
 
 if __name__ == "__main__":

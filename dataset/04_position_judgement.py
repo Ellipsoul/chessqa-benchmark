@@ -66,7 +66,7 @@ def _find_best_option_set(target_eval: int) -> list[int]:
 
 def _get_correct_answer(target_eval: int, options: list[int]) -> str:
     """Return the option closest to the true eval — unambiguous given the band sampling."""
-    closest_option = min(options, key=lambda x: abs(x - target_eval))
+    closest_option = min(options, key=lambda option_value: abs(option_value - target_eval))
     return str(closest_option)
 
 
@@ -85,15 +85,15 @@ def _parse_evaluation_line(line: str) -> dict[str, Any] | None:
         if not fen or not evals:
             return None
 
-        best_eval = max(evals, key=lambda e: e.get("depth", 0))
+        best_eval = max(evals, key=lambda eval_entry: eval_entry.get("depth", 0))
         depth = best_eval.get("depth", 0)
         knodes = best_eval.get("knodes", 0)
 
-        pvs = best_eval.get("pvs", [])
-        if not pvs:
+        principal_variations = best_eval.get("pvs", [])
+        if not principal_variations:
             return None
 
-        best_pv = pvs[0]
+        best_pv = principal_variations[0]
         centipawns = best_pv.get("cp", 0)
         line_moves = best_pv.get("line", "")
 
@@ -128,12 +128,12 @@ def _load_evaluations(data_path: str, max_evaluations: int | None = None) -> lis
     evaluations_loaded = 0
 
     try:
-        with open(data_path, "rb") as f:
-            dctx = zstd.ZstdDecompressor()
+        with open(data_path, "rb") as compressed_file:
+            decompressor = zstd.ZstdDecompressor()
             chunk_size = 1024 * 1024
             buffer = ""
 
-            with dctx.stream_reader(f) as reader:
+            with decompressor.stream_reader(compressed_file) as reader:
                 while True:
                     chunk = reader.read(chunk_size)
                     if not chunk:
@@ -170,8 +170,8 @@ def _load_evaluations(data_path: str, max_evaluations: int | None = None) -> lis
                         evaluations.append(evaluation)
                         evaluations_loaded += 1
 
-    except Exception as e:
-        raise Exception(f"Error loading evaluations: {e}") from e
+    except Exception as error:
+        raise Exception(f"Error loading evaluations: {error}") from error
 
     return evaluations
 
@@ -214,17 +214,17 @@ def generate_centipawn_eval_task(
     )
 
 
-def find_centipawn_eval_tasks(cfg):
+def find_centipawn_eval_tasks(config):
     """Load evals, dedup by position hash, bucket into the five bands, sample per band.
 
-    Each band is shuffled then truncated to cfg.tasks_per_category, so the output is a
+    Each band is shuffled then truncated to config.tasks_per_category, so the output is a
     uniform random sample within each evaluation band.
     """
     found_counter = {category: 0 for category in EVAL_CATEGORIES}
     found = []
     position_hashes = set()
 
-    evaluations = _load_evaluations(cfg.data_path, cfg.max_evaluations if cfg.max_evaluations > 0 else None)
+    evaluations = _load_evaluations(config.data_path, config.max_evaluations if config.max_evaluations > 0 else None)
 
     eval_buckets = defaultdict(list)
 
@@ -243,10 +243,10 @@ def find_centipawn_eval_tasks(cfg):
             continue
 
         random.shuffle(evaluations)
-        selected_evaluations = evaluations[: cfg.tasks_per_category]
+        selected_evaluations = evaluations[: config.tasks_per_category]
 
         for evaluation in selected_evaluations:
-            if found_counter[category] >= cfg.tasks_per_category:
+            if found_counter[category] >= config.tasks_per_category:
                 break
             task = generate_centipawn_eval_task(evaluation, category, found_counter)
             found_counter[category] += 1
@@ -269,10 +269,10 @@ def parse_args():
 
 def main():
     """Generate the Position Judgment benchmark file from the Lichess eval dump."""
-    cfg = parse_args()
-    seed_everything(cfg.seed)
-    found = find_centipawn_eval_tasks(cfg)
-    save_tasks(found, "position_judgement.jsonl", cfg)
+    config = parse_args()
+    seed_everything(config.seed)
+    found = find_centipawn_eval_tasks(config)
+    save_tasks(found, "position_judgement.jsonl", config)
 
 
 if __name__ == "__main__":

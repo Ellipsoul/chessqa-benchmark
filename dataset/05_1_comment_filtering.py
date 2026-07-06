@@ -211,11 +211,11 @@ KEYWORDS_DEFAULT: list[str] = [
 WORD_RE = re.compile(r"[A-Za-z0-9']+")
 
 
-def count_words(s: str) -> int:
+def count_words(text: str) -> int:
     """Count 'words' as alphanumeric (and apostrophe) tokens."""
-    if not s:
+    if not text:
         return 0
-    return len(WORD_RE.findall(s))
+    return len(WORD_RE.findall(text))
 
 
 def should_keep_comment(text: str, matched_keywords: list[str], min_words: int = 5) -> bool:
@@ -223,11 +223,11 @@ def should_keep_comment(text: str, matched_keywords: list[str], min_words: int =
     return bool(matched_keywords) and count_words(text) >= min_words
 
 
-def _normalize_lines_to_keywords(s: str) -> list[str]:
+def _normalize_lines_to_keywords(raw_text: str) -> list[str]:
     # From a newline-separated text file (supports comments with '#')
-    kws = {line.strip() for line in s.splitlines() if line.strip() and not line.strip().startswith("#")}
+    keywords = {line.strip() for line in raw_text.splitlines() if line.strip() and not line.strip().startswith("#")}
     # Sort longer phrases first (helps when you eventually add overlapping terms)
-    return sorted(kws, key=lambda x: (-len(x), x))
+    return sorted(keywords, key=lambda keyword: (-len(keyword), keyword))
 
 
 def _flatten_json_keywords(data) -> list[str]:
@@ -236,20 +236,24 @@ def _flatten_json_keywords(data) -> list[str]:
       - list[str] -> as-is
       - dict[str, list[str] or dict with 'synonyms'] -> keys + synonyms
     """
-    out: set[str] = set()
+    keyword_set: set[str] = set()
     if isinstance(data, list):
-        out.update(str(x).strip() for x in data if str(x).strip())
+        keyword_set.update(str(entry).strip() for entry in data if str(entry).strip())
     elif isinstance(data, dict):
-        for k, v in data.items():
-            k = str(k).strip()
-            if k:
-                out.add(k)
+        for canonical_keyword, synonym_value in data.items():
+            canonical_keyword = str(canonical_keyword).strip()
+            if canonical_keyword:
+                keyword_set.add(canonical_keyword)
             # Allow {"canonical": ["syn1","syn2"]} OR {"canonical": {"synonyms":[...]}}
-            if isinstance(v, list):
-                out.update(str(x).strip() for x in v if str(x).strip())
-            elif isinstance(v, dict) and "synonyms" in v and isinstance(v["synonyms"], list):
-                out.update(str(x).strip() for x in v["synonyms"] if str(x).strip())
-    return sorted(out, key=lambda x: (-len(x), x))
+            if isinstance(synonym_value, list):
+                keyword_set.update(str(entry).strip() for entry in synonym_value if str(entry).strip())
+            elif (
+                isinstance(synonym_value, dict)
+                and "synonyms" in synonym_value
+                and isinstance(synonym_value["synonyms"], list)
+            ):
+                keyword_set.update(str(entry).strip() for entry in synonym_value["synonyms"] if str(entry).strip())
+    return sorted(keyword_set, key=lambda keyword: (-len(keyword), keyword))
 
 
 def load_keywords(keywords_path: Path | None) -> list[str]:
@@ -265,20 +269,20 @@ def load_keywords(keywords_path: Path | None) -> list[str]:
     # Try JSON first
     try:
         data = json.loads(text)
-        kws = _flatten_json_keywords(data)
-        if kws:
-            return kws
+        keywords = _flatten_json_keywords(data)
+        if keywords:
+            return keywords
     except json.JSONDecodeError:
         pass
 
     # Fallback: treat as newline-separated text
-    kws = _normalize_lines_to_keywords(text)
-    return kws if kws else KEYWORDS_DEFAULT
+    keywords = _normalize_lines_to_keywords(text)
+    return keywords if keywords else KEYWORDS_DEFAULT
 
 
-def normalize_text(s: str) -> str:
+def normalize_text(text: str) -> str:
     """Normalize text by removing non-alphanumeric characters and lowercasing."""
-    return "".join(ch for ch in s.lower() if ch.isalnum())
+    return "".join(character for character in text.lower() if character.isalnum())
 
 
 def find_keywords_in_comment(comment: str, keywords: Iterable[str]) -> list[str]:
@@ -290,8 +294,8 @@ def find_keywords_in_comment(comment: str, keywords: Iterable[str]) -> list[str]
         return []
 
     # Normalize to space-separated tokens
-    def norm_words(s: str) -> str:
-        return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+    def norm_words(raw_text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", raw_text.lower()).strip()
 
     norm_comment = f" {norm_words(comment)} "  # pad to allow 'word boundary' with spaces
 
@@ -299,14 +303,14 @@ def find_keywords_in_comment(comment: str, keywords: Iterable[str]) -> list[str]
     seen = set()
 
     # Try longer keywords first so 'distant passed pawn' matches before 'passed pawn'
-    for kw in sorted(set(keywords), key=lambda x: (-len(x), x)):
-        kw_norm = norm_words(kw)
-        if not kw_norm:
+    for keyword in sorted(set(keywords), key=lambda entry: (-len(entry), entry)):
+        normalized_keyword = norm_words(keyword)
+        if not normalized_keyword:
             continue
-        test = f" {kw_norm} "
-        if test in norm_comment and kw_norm not in seen:
-            matched.append(kw)
-            seen.add(kw_norm)
+        padded_keyword = f" {normalized_keyword} "
+        if padded_keyword in norm_comment and normalized_keyword not in seen:
+            matched.append(keyword)
+            seen.add(normalized_keyword)
     return matched
 
 
@@ -315,19 +319,19 @@ def format_pgn_until(san_moves: list[str]) -> str:
 
     Example: ["e4", "e5", "Nf3"] -> "1. e4 e5 2. Nf3"
     """
-    out: list[str] = []
+    formatted_moves: list[str] = []
     move_index = 0
     move_number = 1
     while move_index < len(san_moves):
         # White move
-        out.append(f"{move_number}. {san_moves[move_index]}")
+        formatted_moves.append(f"{move_number}. {san_moves[move_index]}")
         move_index += 1
         if move_index < len(san_moves):
             # Black move on same move number
-            out.append(san_moves[move_index])
+            formatted_moves.append(san_moves[move_index])
             move_index += 1
         move_number += 1
-    return " ".join(out)
+    return " ".join(formatted_moves)
 
 
 def extract_comments_from_game(
@@ -395,9 +399,9 @@ def extract_comments_from_game(
                         "game_id": game_id,
                         # Commonly useful headers (include if present)
                         **{
-                            k: v
-                            for k, v in game.headers.items()
-                            if k
+                            header_key: header_value
+                            for header_key, header_value in game.headers.items()
+                            if header_key
                             in {
                                 "Event",
                                 "Site",
@@ -442,11 +446,14 @@ def process_pgn(
     games_processed = 0
     games_with_comments = 0
 
-    with open(pgn_path, encoding="utf-8", errors="ignore") as f, tqdm(desc="Reading games", unit="game") as pbar:
+    with (
+        open(pgn_path, encoding="utf-8", errors="ignore") as pgn_file,
+        tqdm(desc="Reading games", unit="game") as progress_bar,
+    ):
         while True:
             if max_games is not None and games_processed >= max_games:
                 break
-            game = chess.pgn.read_game(f)
+            game = chess.pgn.read_game(pgn_file)
             if game is None:
                 break
             games_processed += 1
@@ -456,11 +463,11 @@ def process_pgn(
                 games_with_comments += 1
                 all_entries.extend(entries)
 
-            pbar.update(1)
+            progress_bar.update(1)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as out:
-        json.dump(all_entries, out, ensure_ascii=False, indent=2)
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        json.dump(all_entries, output_file, ensure_ascii=False, indent=2)
 
     return {
         "games_processed": games_processed,
@@ -471,14 +478,14 @@ def process_pgn(
 
 
 def main():
-    p = argparse.ArgumentParser(description="Create a comment-based dataset from a PGN file")
-    p.add_argument("--pgn", type=Path, default=Path("../../data/raw/filtered_chessbase.pgn"))
-    p.add_argument("--output", type=Path, default=Path("../../data/mid/comment_dataset.json"))
-    p.add_argument("--max-games", type=int, default=None, help="Optional limit on number of games to process")
-    p.add_argument(
+    argument_parser = argparse.ArgumentParser(description="Create a comment-based dataset from a PGN file")
+    argument_parser.add_argument("--pgn", type=Path, default=Path("../../data/raw/filtered_chessbase.pgn"))
+    argument_parser.add_argument("--output", type=Path, default=Path("../../data/mid/comment_dataset.json"))
+    argument_parser.add_argument("--max-games", type=int, default=None, help="Optional limit on number of games to process")
+    argument_parser.add_argument(
         "--keywords", type=Path, default=None, help="Optional path to keywords file (json dict keys or text lines)"
     )
-    args = p.parse_args()
+    args = argument_parser.parse_args()
 
     stats = process_pgn(args.pgn, args.output, args.max_games, args.keywords)
     print(json.dumps({"ok": True, **stats, "output": str(args.output)}, indent=2))

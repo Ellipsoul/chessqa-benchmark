@@ -106,22 +106,22 @@ def get_piece_arrangement(fen):
                 5: "Queen",
                 6: "King",
             }
-            key = f"{color} {names[piece.piece_type]}"
-            if key not in pieces:
-                pieces[key] = []
-            pieces[key].append(chess.square_name(square))
+            piece_key = f"{color} {names[piece.piece_type]}"
+            if piece_key not in pieces:
+                pieces[piece_key] = []
+            pieces[piece_key].append(chess.square_name(square))
 
     # Sort squares alphabetically for each piece type
-    for key in pieces:
-        pieces[key].sort()
+    for piece_key in pieces:
+        pieces[piece_key].sort()
 
     # Build arrangement string in specified order
     arrangement_parts = []
     for color in colors:
         for piece_type in piece_order:
-            key = f"{color} {piece_type}"
-            if key in pieces:
-                arrangement_parts.append(f"{key}: {pieces[key]}")
+            piece_key = f"{color} {piece_type}"
+            if piece_key in pieces:
+                arrangement_parts.append(f"{piece_key}: {pieces[piece_key]}")
 
     return ", ".join(arrangement_parts)
 
@@ -207,16 +207,16 @@ def make_pre_move(row: pd.Series) -> tuple[str, str]:
     return fen_after, moves[1]
 
 
-def save_tasks(tasks, file_name, cfg):
-    """Write tasks as JSONL (one ``ChessQuestionAnsweringTask`` dict per line) under ``cfg.output_root``."""
-    if not os.path.exists(cfg.output_root):
-        os.makedirs(cfg.output_root)
-    output_path = os.path.join(cfg.output_root, file_name)
+def save_tasks(tasks, file_name, config):
+    """Write tasks as JSONL (one ``ChessQuestionAnsweringTask`` dict per line) under ``config.output_root``."""
+    if not os.path.exists(config.output_root):
+        os.makedirs(config.output_root)
+    output_path = os.path.join(config.output_root, file_name)
     tasks_data = [asdict(task) for task in tasks]
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8") as output_file:
         for task in tasks_data:
-            f.write(json.dumps(task, ensure_ascii=False) + "\n")
+            output_file.write(json.dumps(task, ensure_ascii=False) + "\n")
 
 
 def get_piece_name(piece: chess.Piece) -> str:
@@ -273,22 +273,22 @@ def seed_everything(seed):
         pass
 
 
-def readable_num(num):
+def readable_num(number):
     """Format a count with a B/M/K suffix for progress logs, e.g. ``1_500_000 -> "1.50M"``."""
-    if num >= 1e9:
-        return f"{num / 1e9:.2f}B"
-    elif num >= 1e6:
-        return f"{num / 1e6:.2f}M"
-    elif num >= 1e3:
-        return f"{num / 1e3:.2f}K"
+    if number >= 1e9:
+        return f"{number / 1e9:.2f}B"
+    elif number >= 1e6:
+        return f"{number / 1e6:.2f}M"
+    elif number >= 1e3:
+        return f"{number / 1e3:.2f}K"
     else:
-        return str(num)
+        return str(number)
 
 
 def readable_time(elapsed_time):
     """Format seconds as ``"1h 2m 3.00s"`` / ``"2m 3.00s"`` / ``"3.00s"`` for progress logs."""
-    hours, rem = divmod(elapsed_time, 3600)
-    minutes, seconds = divmod(rem, 60)
+    hours, remainder = divmod(elapsed_time, 3600)
+    minutes, seconds = divmod(remainder, 60)
 
     if hours > 0:
         return f"{int(hours)}h {int(minutes)}m {seconds:.2f}s"
@@ -304,11 +304,11 @@ def read_puzzles(file_path):
     The shuffle uses pandas' global random state, so ``seed_everything`` must be called first
     for reproducible sampling. The CSV is large (~5M rows), hence the timing printouts.
     """
-    t_0 = time.time()
-    df = pd.read_csv(file_path)
-    t_1 = time.time()
-    df = df.sample(frac=1).reset_index(drop=True)
-    print(f"Time to read: {readable_time(t_1 - t_0)}", flush=True)
-    print(f"Time to shuffle: {readable_time(time.time() - t_1)}", flush=True)
+    read_start_time = time.time()
+    puzzle_dataframe = pd.read_csv(file_path)
+    shuffle_start_time = time.time()
+    puzzle_dataframe = puzzle_dataframe.sample(frac=1).reset_index(drop=True)
+    print(f"Time to read: {readable_time(shuffle_start_time - read_start_time)}", flush=True)
+    print(f"Time to shuffle: {readable_time(time.time() - shuffle_start_time)}", flush=True)
 
-    return df
+    return puzzle_dataframe

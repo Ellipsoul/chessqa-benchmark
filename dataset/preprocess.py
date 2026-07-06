@@ -20,12 +20,12 @@ import tqdm
 from utils import read_puzzles
 
 
-def find_all_themes(data, cfg):
+def find_all_themes(data, config):
     """Tally every space-separated theme tag across the puzzle DataFrame and dump to JSON.
 
     Args:
         data: Puzzle DataFrame with a ``Themes`` column of space-separated tags.
-        cfg: Parsed CLI args providing ``output_root``.
+        config: Parsed CLI args providing ``output_root``.
 
     Returns:
         Dict mapping theme tag -> occurrence count.
@@ -38,8 +38,8 @@ def find_all_themes(data, cfg):
             for theme in themes_list:
                 all_themes[theme] = all_themes.get(theme, 0) + 1
 
-    with open(os.path.join(cfg.output_root, "info", "all_themes.json"), "w") as f:
-        json.dump(all_themes, f, indent=4)
+    with open(os.path.join(config.output_root, "info", "all_themes.json"), "w") as themes_file:
+        json.dump(all_themes, themes_file, indent=4)
 
     return all_themes
 
@@ -56,9 +56,9 @@ def parse_args():
 
 def main():
     """Load puzzles, count themes, report the number of unique tags found."""
-    cfg = parse_args()
-    puzzle_data = read_puzzles(cfg.puzzle_path)
-    all_themes = find_all_themes(puzzle_data, cfg)
+    config = parse_args()
+    puzzle_data = read_puzzles(config.puzzle_path)
+    all_themes = find_all_themes(puzzle_data, config)
     print(f"Found {len(all_themes)} unique themes.")
 
 

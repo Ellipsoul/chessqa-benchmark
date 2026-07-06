@@ -75,8 +75,8 @@ def _setup_env(
 
 def load_items(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
     """Load the stage-2 JSON array, optionally truncated to max_records for quick test runs."""
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+    with open(path, encoding="utf-8") as input_file:
+        data = json.load(input_file)
     if not isinstance(data, list):
         raise ValueError("Input must be a JSON array")
     if max_records and max_records > 0:
@@ -87,8 +87,8 @@ def load_items(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
 def save_items(path: Path, items: list[dict[str, Any]]) -> None:
     """Write kept records as a pretty-printed JSON array, creating parent dirs."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
+    with open(path, "w", encoding="utf-8") as output_file:
+        json.dump(items, output_file, ensure_ascii=False, indent=2)
 
 
 PIECE_WORDS = {
@@ -154,23 +154,23 @@ def heuristic_is_relevant(text: str) -> bool:
     """
     if not text:
         return False
-    t = text.strip()
+    stripped_text = text.strip()
     # Length threshold
-    if len(t) < 25:
+    if len(stripped_text) < 25:
         return False
-    low = t.lower()
+    lowercase_text = stripped_text.lower()
     # Obvious generic signals
-    for p in GENERIC_PHRASES:
-        if p in low:
+    for generic_phrase in GENERIC_PHRASES:
+        if generic_phrase in lowercase_text:
             return False
     # SAN/UCI presence
-    if any(p.search(t) for p in SAN_UCI_PATTERNS):
+    if any(pattern.search(stripped_text) for pattern in SAN_UCI_PATTERNS):
         return True
     # Chess word presence
-    if any(w in low for w in PIECE_WORDS):
+    if any(chess_word in lowercase_text for chess_word in PIECE_WORDS):
         return True
     # Square mention (at least one square)
-    return bool(re.search(r"\b[a-h][1-8]\b", t))
+    return bool(re.search(r"\b[a-h][1-8]\b", stripped_text))
 
 
 def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
@@ -184,7 +184,7 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
     side_to_move = item.get("side_to_move", "")
     pgn_until = item.get("pgn_until_move", "")
 
-    sys = (
+    system_prompt = (
         "You are a strict chess commentary relevance judge. "
         "Given a single comment and the exact game context (FENs, PGN so far, and the move), decide if the comment is directly useful to understand or evaluate the current move/position in THIS game. "
         "Output exactly one token: KEEP or DROP."
@@ -192,7 +192,7 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
         "\nDROP if the comment is generic quotes/aphorisms, meta or biography, audience/event chatter, or otherwise unrelated to the concrete move/position."
     )
 
-    usr = (
+    user_prompt = (
         f"Comment: {comment}\n"
         f"Move UCI: {move_uci} | Move number: {move_number} | Side to move: {side_to_move}\n"
         f"FEN before: {fen_before}\n"
@@ -213,10 +213,10 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
     ex_assistant = "DROP"
 
     return [
-        {"role": "system", "content": sys},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": ex_user},
         {"role": "assistant", "content": ex_assistant},
-        {"role": "user", "content": usr},
+        {"role": "user", "content": user_prompt},
     ]
 
 
@@ -225,18 +225,18 @@ def sanitize_label(text: str) -> str:
     unparseable (strips think-blocks/backticks, then searches for either label)."""
     if not text:
         return "DROP"
-    t = text.strip().strip("` ")
+    working_text = text.strip().strip("` ")
     # remove <think> blocks if any
-    t = re.sub(r"(?is)<think>.*?(</think>|$)", "", t).strip()
+    working_text = re.sub(r"(?is)<think>.*?(</think>|$)", "", working_text).strip()
     # collapse whitespace
-    t = re.sub(r"\s+", " ", t)
+    working_text = re.sub(r"\s+", " ", working_text)
     # extract a label if present in text
-    m = re.search(r"\b(KEEP|DROP)\b", t, re.I)
-    if m:
-        return m.group(1).upper()
+    label_match = re.search(r"\b(KEEP|DROP)\b", working_text, re.I)
+    if label_match:
+        return label_match.group(1).upper()
     # fallback: first token upper
-    tok = t.split()[0].upper() if t.split() else "DROP"
-    return tok if tok in {"KEEP", "DROP"} else "DROP"
+    first_token = working_text.split()[0].upper() if working_text.split() else "DROP"
+    return first_token if first_token in {"KEEP", "DROP"} else "DROP"
 
 
 def main() -> int:
@@ -248,34 +248,34 @@ def main() -> int:
     """
     default_input = Path("../../data/mid/comment_dataset.cleaned.json")
     default_output = Path("../../data/mid/comment_dataset.final.json")
-    ap = argparse.ArgumentParser(description="Judge relevance of cleaned comments using vLLM")
-    ap.add_argument("--input", type=Path, default=default_input)
-    ap.add_argument("--output", type=Path, default=default_output)
-    ap.add_argument("--model", type=str, default="Qwen/Qwen3-30B-A3B-Instruct-2507")
-    ap.add_argument("--batch-size", type=int, default=1024)
-    ap.add_argument("--max-records", type=int, default=0)
-    ap.add_argument("--max-model-len", type=int, default=4096)
-    ap.add_argument("--max-tokens", type=int, default=8)
-    ap.add_argument("--tensor-parallel-size", type=int, default=1)
-    ap.add_argument("--gpu-memory-utilization", type=float, default=0.80)
-    ap.add_argument(
+    argument_parser = argparse.ArgumentParser(description="Judge relevance of cleaned comments using vLLM")
+    argument_parser.add_argument("--input", type=Path, default=default_input)
+    argument_parser.add_argument("--output", type=Path, default=default_output)
+    argument_parser.add_argument("--model", type=str, default="Qwen/Qwen3-30B-A3B-Instruct-2507")
+    argument_parser.add_argument("--batch-size", type=int, default=1024)
+    argument_parser.add_argument("--max-records", type=int, default=0)
+    argument_parser.add_argument("--max-model-len", type=int, default=4096)
+    argument_parser.add_argument("--max-tokens", type=int, default=8)
+    argument_parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    argument_parser.add_argument("--gpu-memory-utilization", type=float, default=0.80)
+    argument_parser.add_argument(
         "--dtype", type=str, default=None, choices=[None, "auto", "float16", "bfloat16", "float32"], nargs="?"
     )
-    ap.add_argument("--attention-backend", type=str, default=None, choices=[None, "FLASH_ATTN", "XFORMERS"], nargs="?")
-    gfi = ap.add_mutually_exclusive_group()
-    gfi.add_argument("--use-flashinfer", dest="use_flashinfer", action="store_true")
-    gfi.add_argument("--no-flashinfer", dest="use_flashinfer", action="store_false")
-    ap.set_defaults(use_flashinfer=False)
-    gthink = ap.add_mutually_exclusive_group()
-    gthink.add_argument("--enable-thinking", dest="enable_thinking", action="store_true")
-    gthink.add_argument("--disable-thinking", dest="enable_thinking", action="store_false")
-    ap.set_defaults(enable_thinking=False)
-    gheu = ap.add_mutually_exclusive_group()
-    gheu.add_argument("--heuristics", dest="heuristics", action="store_true")
-    gheu.add_argument("--no-heuristics", dest="heuristics", action="store_false")
-    ap.set_defaults(heuristics=True)
+    argument_parser.add_argument("--attention-backend", type=str, default=None, choices=[None, "FLASH_ATTN", "XFORMERS"], nargs="?")
+    flashinfer_group = argument_parser.add_mutually_exclusive_group()
+    flashinfer_group.add_argument("--use-flashinfer", dest="use_flashinfer", action="store_true")
+    flashinfer_group.add_argument("--no-flashinfer", dest="use_flashinfer", action="store_false")
+    argument_parser.set_defaults(use_flashinfer=False)
+    thinking_group = argument_parser.add_mutually_exclusive_group()
+    thinking_group.add_argument("--enable-thinking", dest="enable_thinking", action="store_true")
+    thinking_group.add_argument("--disable-thinking", dest="enable_thinking", action="store_false")
+    argument_parser.set_defaults(enable_thinking=False)
+    heuristics_group = argument_parser.add_mutually_exclusive_group()
+    heuristics_group.add_argument("--heuristics", dest="heuristics", action="store_true")
+    heuristics_group.add_argument("--no-heuristics", dest="heuristics", action="store_false")
+    argument_parser.set_defaults(heuristics=True)
 
-    args = ap.parse_args()
+    args = argument_parser.parse_args()
 
     items = load_items(args.input, args.max_records)
     kept: list[dict[str, Any]] = []
@@ -284,16 +284,16 @@ def main() -> int:
     heuristic_labels: list[str] = []
     to_judge: list[dict[str, Any]] = []
     if args.heuristics:
-        for it in items:
-            text = it.get("cleaned_comment") or it.get("comment", "")
+        for item in items:
+            text = item.get("cleaned_comment") or item.get("comment", "")
             if heuristic_is_relevant(text):
-                to_judge.append(it)
+                to_judge.append(item)
                 heuristic_labels.append("CANDIDATE")
             else:
                 heuristic_labels.append("DROP")
         # NOTE (upstream dead code, kept as-is): this comprehension's result is discarded —
         # the candidate->item mapping is actually reconstructed positionally further down.
-        [i for i, lab in enumerate(heuristic_labels) if lab == "CANDIDATE"]
+        [label_index for label_index, label in enumerate(heuristic_labels) if label == "CANDIDATE"]
     else:
         to_judge = items
         # NOTE (upstream dead code, kept as-is): result discarded, same as above.
@@ -326,46 +326,46 @@ def main() -> int:
         llm_kwargs["dtype"] = args.dtype
 
     llm = LLM(**llm_kwargs)
-    sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=int(args.max_tokens))
+    sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=int(args.max_tokens))
 
     # Judge in batches
     labels: list[str] = [None] * len(to_judge)
-    t0 = time.time()
-    for i in range(0, len(to_judge), args.batch_size):
-        batch = to_judge[i : i + args.batch_size]
-        prompts = [build_messages(it) for it in batch]
+    start_time = time.time()
+    for batch_start in range(0, len(to_judge), args.batch_size):
+        batch = to_judge[batch_start : batch_start + args.batch_size]
+        prompts = [build_messages(item) for item in batch]
         chat_kwargs: dict[str, Any] = {}
         if args.enable_thinking is not None:
             chat_kwargs["chat_template_kwargs"] = {"enable_thinking": bool(args.enable_thinking)}
         try:
-            outs = llm.chat(prompts, sp, **chat_kwargs)
+            batch_outputs = llm.chat(prompts, sampling_params, **chat_kwargs)
         except Exception:
-            outs = llm.chat(prompts, sp)
-        for j, out in enumerate(outs):
-            text = out.outputs[0].text if out.outputs and out.outputs[0] else ""
-            labels[i + j] = sanitize_label(text)
+            batch_outputs = llm.chat(prompts, sampling_params)
+        for batch_offset, model_output in enumerate(batch_outputs):
+            text = model_output.outputs[0].text if model_output.outputs and model_output.outputs[0] else ""
+            labels[batch_start + batch_offset] = sanitize_label(text)
 
-    dt = time.time() - t0
-    print(f"Judged {len(to_judge)} candidates in {dt:.1f}s")
+    elapsed_seconds = time.time() - start_time
+    print(f"Judged {len(to_judge)} candidates in {elapsed_seconds:.1f}s")
 
     # Combine heuristic and LLM labels
     if args.heuristics:
-        k = 0
-        for idx, lab in enumerate(heuristic_labels):
-            if lab == "DROP":
+        judged_cursor = 0
+        for label_index, label in enumerate(heuristic_labels):
+            if label == "DROP":
                 continue
-            heuristic_labels[idx] = labels[k]
-            k += 1
+            heuristic_labels[label_index] = labels[judged_cursor]
+            judged_cursor += 1
         final_labels = heuristic_labels
     else:
         final_labels = labels
 
     # Decide and keep
     keeps = 0
-    for i, it in enumerate(items):
-        lab = final_labels[i] if i < len(final_labels) else "DROP"
-        if lab == "KEEP":
-            kept.append(it)
+    for item_index, item in enumerate(items):
+        label = final_labels[item_index] if item_index < len(final_labels) else "DROP"
+        if label == "KEEP":
+            kept.append(item)
             keeps += 1
 
     save_items(args.output, kept)

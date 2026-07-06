@@ -69,8 +69,8 @@ def load_tasks(
     for file_path in sorted(jsonl_files):
         print(f"Loading {file_path.name}...")
         file_tasks = []
-        with open(file_path, encoding="utf-8") as f:
-            for line in f:
+        with open(file_path, encoding="utf-8") as task_file:
+            for line in task_file:
                 if line.strip():
                     file_tasks.append(json.loads(line.strip()))
         print(f"  Loaded {len(file_tasks)} tasks")
@@ -93,11 +93,11 @@ def load_tasks(
         # seed in a comment but used the unseeded global RNG). This also makes resume
         # coherent for subsampled runs — previously each invocation sampled a different
         # subset, so resumed runs silently evaluated a mix of subsets.
-        rng = random.Random(42)
+        subsample_random_generator = random.Random(42)
         sampled_tasks = []
         for task_type, type_tasks in tasks_by_type.items():
             if len(type_tasks) > n_samples_per_task:
-                rng.shuffle(type_tasks)
+                subsample_random_generator.shuffle(type_tasks)
                 sampled = type_tasks[:n_samples_per_task]
             else:
                 sampled = type_tasks
@@ -143,17 +143,17 @@ def get_context(fen: str) -> str:
         if piece:
             color = "White" if piece.color == chess.WHITE else "Black"
             names = {1: "Pawn", 2: "Knight", 3: "Bishop", 4: "Rook", 5: "Queen", 6: "King"}
-            key = f"{color} {names[piece.piece_type]}"
-            if key not in pieces:
-                pieces[key] = []
-            pieces[key].append(chess.square_name(square))
+            piece_key = f"{color} {names[piece.piece_type]}"
+            if piece_key not in pieces:
+                pieces[piece_key] = []
+            pieces[piece_key].append(chess.square_name(square))
 
     # Canonical presentation order, mirroring dataset/utils.get_piece_arrangement.
     for squares in pieces.values():
         squares.sort()
     piece_order = ["King", "Queen", "Rook", "Bishop", "Knight", "Pawn"]
     ordered_keys = [f"{color} {piece_type}" for color in ("White", "Black") for piece_type in piece_order]
-    arrangement = ", ".join(f"{k}: {pieces[k]}" for k in ordered_keys if k in pieces)
+    arrangement = ", ".join(f"{piece_key}: {pieces[piece_key]}" for piece_key in ordered_keys if piece_key in pieces)
     legal_moves = ", ".join(sorted(move.uci() for move in board.legal_moves))
 
     return f"Piece arrangement: {arrangement}\nLegal moves: {legal_moves}\n\n"
@@ -416,8 +416,8 @@ class OpenrouterInferencer:
         # Additional filename suffix to differentiate experiment variants in outputs
         self.filename_suffix = filename_suffix
         keys_path = Path(__file__).parent.parent.parent / "keys" / "api_keys.json"
-        with open(keys_path) as f:
-            keys = json.load(f)
+        with open(keys_path) as keys_file:
+            keys = json.load(keys_file)
         self.api_key = keys.get("openrouter_api_key")
         self.url = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -505,9 +505,9 @@ class OpenrouterInferencer:
                 usage = result.get("usage", {})
                 return content, thinking_content, usage
 
-            except Exception as e:
+            except Exception as error:
                 if attempt == self.max_retries - 1:
-                    return f"ERROR: {e}", "", {}
+                    return f"ERROR: {error}", "", {}
                 # Exponential backoff with jitter
                 wait_time = (2**attempt) + random.uniform(0, 1)
                 time.sleep(wait_time)
@@ -541,7 +541,7 @@ class OpenrouterInferencer:
         if num_workers == 1:
             # Sequential processing with progress bar and incremental saving
             results = []
-            for i, task in enumerate(tqdm(tasks, desc="Processing tasks")):
+            for task_index, task in enumerate(tqdm(tasks, desc="Processing tasks")):
                 prompt = format_prompt(task, self.add_context, format_example_group)
                 response, thinking_content, usage = self.call_model(prompt)
                 extracted, extraction_successful = extract_answer(response)
@@ -567,7 +567,7 @@ class OpenrouterInferencer:
                 results.append(result)
 
                 # Save every save_interval responses
-                if output_path and (i + 1) % save_interval == 0:
+                if output_path and (task_index + 1) % save_interval == 0:
                     # Save only the last save_interval new results
                     start_idx = max(0, len(results) - save_interval)
                     new_batch = results[start_idx:]
@@ -603,20 +603,20 @@ class OpenrouterInferencer:
             with Pool(num_workers) as pool:
                 # Use imap for progress tracking
                 results = []
-                for i, result in enumerate(
+                for result_position, result in enumerate(
                     tqdm(pool.imap(process_single_task, args_list), total=len(args_list), desc="Processing tasks")
                 ):
                     results.append(result)
 
                     # Save every save_interval responses
-                    if output_path and (i + 1) % save_interval == 0:
+                    if output_path and (result_position + 1) % save_interval == 0:
                         # For parallel processing, we need to maintain order first
-                        temp_task_id_to_result = {r["task_id"]: r for r in results}
+                        temp_task_id_to_result = {result["task_id"]: result for result in results}
                         temp_ordered_results = []
-                        for j in range(i + 1):
-                            if tasks[j]["task_id"] in temp_task_id_to_result:
-                                temp_ordered_results.append(temp_task_id_to_result[tasks[j]["task_id"]])
-                        if len(temp_ordered_results) == i + 1:  # All results up to this point are available
+                        for task_position in range(result_position + 1):
+                            if tasks[task_position]["task_id"] in temp_task_id_to_result:
+                                temp_ordered_results.append(temp_task_id_to_result[tasks[task_position]["task_id"]])
+                        if len(temp_ordered_results) == result_position + 1:  # All results up to this point are available
                             # Save only the last save_interval new results
                             start_idx = max(0, len(temp_ordered_results) - save_interval)
                             new_batch = temp_ordered_results[start_idx:]
@@ -626,7 +626,7 @@ class OpenrouterInferencer:
             if output_path and len(results) % save_interval != 0:
                 remaining_count = len(results) % save_interval
                 # For parallel processing, maintain order
-                temp_task_id_to_result = {r["task_id"]: r for r in results}
+                temp_task_id_to_result = {result["task_id"]: result for result in results}
                 temp_ordered_results = []
                 for task in tasks:
                     if task["task_id"] in temp_task_id_to_result:
@@ -636,7 +636,7 @@ class OpenrouterInferencer:
                 self._save_incremental_results(remaining_results, output_path)
 
             # Maintain original order
-            task_id_to_result = {r["task_id"]: r for r in results}
+            task_id_to_result = {result["task_id"]: result for result in results}
             ordered_results = [task_id_to_result[task["task_id"]] for task in tasks]
 
             return ordered_results
@@ -661,19 +661,19 @@ class OpenrouterInferencer:
 
             # Append new results to JSONL file
             results_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(results_file, "a") as f:
+            with open(results_file, "a") as jsonl_file:
                 for result in new_results:
-                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    jsonl_file.write(json.dumps(result, ensure_ascii=False) + "\n")
 
             # Calculate current accuracy for progress info
             total = len(new_results)
-            correct = sum(r["inference"]["is_correct"] for r in new_results)
+            correct = sum(result["inference"]["is_correct"] for result in new_results)
             accuracy = correct / total if total > 0 else 0.0
 
             print(f"\nIncremental save: {results_file} (+{total} tasks, {accuracy:.3f} accuracy for new tasks)")
 
-        except Exception as e:
-            print(f"\nWarning: Failed to save incremental results: {e}")
+        except Exception as error:
+            print(f"\nWarning: Failed to save incremental results: {error}")
 
     def _save_existing_results(self, existing_results: list[dict[str, Any]], output_path: str):
         """Overwrite the results file with previously completed results (resume bootstrap),
@@ -691,14 +691,14 @@ class OpenrouterInferencer:
 
             # Write existing results to file (overwrite)
             results_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(results_file, "w") as f:
+            with open(results_file, "w") as jsonl_file:
                 for result in existing_results:
-                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    jsonl_file.write(json.dumps(result, ensure_ascii=False) + "\n")
 
             print(f"\nSaved {len(existing_results)} existing complete results to {results_file}")
 
-        except Exception as e:
-            print(f"\nWarning: Failed to save existing results: {e}")
+        except Exception as error:
+            print(f"\nWarning: Failed to save existing results: {error}")
 
 
 def load_existing_results(results_file: Path) -> dict[str, dict[str, Any]]:
@@ -710,8 +710,8 @@ def load_existing_results(results_file: Path) -> dict[str, dict[str, Any]]:
     print(f"Loading existing results from {results_file}")
 
     existing_results = {}
-    with open(results_file) as f:
-        for line in f:
+    with open(results_file) as results_input:
+        for line in results_input:
             if line.strip():
                 result = json.loads(line.strip())
                 task_id = result.get("task_id")
@@ -835,8 +835,8 @@ def main():
         # Load existing results
         print(f"Loading results from {results_file}")
         results = []
-        with open(results_file) as f:
-            for line in f:
+        with open(results_file) as results_input:
+            for line in results_input:
                 if line.strip():
                     results.append(json.loads(line.strip()))
 
@@ -852,7 +852,7 @@ def main():
 
         # Make sure task order is maintained
         task_id_to_task = {task["task_id"]: task for task in tasks}
-        task_id_to_result = {r["task_id"]: r for r in results}
+        task_id_to_result = {result["task_id"]: result for result in results}
 
         # Ensure all task fields are present in results
         for result in results:
@@ -860,15 +860,15 @@ def main():
             if task_id in task_id_to_task:
                 task = task_id_to_task[task_id]
                 # Update any missing fields from original task
-                for key, value in task.items():
-                    if key not in result:
-                        result[key] = value
+                for field_name, field_value in task.items():
+                    if field_name not in result:
+                        result[field_name] = field_value
 
         # Save the re-evaluated results back to the JSONL file
         print(f"Saving re-evaluated results to {results_file}")
-        with open(results_file, "w") as f:
+        with open(results_file, "w") as results_output:
             for result in results:
-                f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                results_output.write(json.dumps(result, ensure_ascii=False) + "\n")
 
         # Use dummy timing for eval-only mode
         start_time = time.time()
@@ -949,7 +949,7 @@ def main():
 
     # Calculate stats
     total = len(results)
-    correct = sum(r["inference"]["is_correct"] for r in results)
+    correct = sum(result["inference"]["is_correct"] for result in results)
     accuracy = correct / total
 
     # Calculate usage statistics
@@ -972,10 +972,10 @@ def main():
     task_type_stats = {}
     task_category_stats = {}
 
-    for i, result in enumerate(results):
+    for result_index, result in enumerate(results):
         task_type = result["task_type"]
         # Extract task_category from the original task
-        task_category = tasks[i].get("task_category", "unknown")
+        task_category = tasks[result_index].get("task_category", "unknown")
         usage = result.get("inference", {}).get("usage", {})
 
         # Task type stats
@@ -1030,18 +1030,18 @@ def main():
 
     # Save results as JSONL (one result per line)
     results_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(results_file, "w") as f:
+    with open(results_file, "w") as results_output:
         for result in results:
-            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+            results_output.write(json.dumps(result, ensure_ascii=False) + "\n")
 
     # Also save a pretty-printed JSON version for readability
     pretty_file = args.output_dir / f"{model_safe_name}_pretty.json"
-    with open(pretty_file, "w") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+    with open(pretty_file, "w") as pretty_output:
+        json.dump(results, pretty_output, indent=2, ensure_ascii=False)
     print(f"PRETTY JSON SAVED: {pretty_file}")
 
     # Save stats as separate JSON file
-    with open(stats_file, "w") as f:
+    with open(stats_file, "w") as stats_output:
         json.dump(
             {
                 "model": args.model,
@@ -1066,7 +1066,7 @@ def main():
                     "enable_thinking": args.enable_thinking,
                 },
             },
-            f,
+            stats_output,
             indent=2,
         )
 

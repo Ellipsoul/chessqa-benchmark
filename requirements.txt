@@ -1,7 +1,7 @@
 # Core dependencies — eval runner + dataset generators (except semantic/vLLM pipelines).
 chess==1.10.0
 numpy>=1.24.0,<3
-pandas>=2.0.0
+pandas>=2.0.0,<4  # verified against 3.0.3; repo surface is read_csv + Series access in dataset/utils.py
 tqdm>=4.65.0
 requests>=2.28.0
 zstandard>=0.21.0

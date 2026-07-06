@@ -1,3 +1,24 @@
+"""Generator for the Motifs category (benchmark/motifs.jsonl).
+
+Second rung of the abstraction ladder: recognizing named tactical patterns in a static
+position (no calculation required — every motif is detectable from the current board alone).
+
+Six task types, all sourced from Lichess puzzle positions, all "multi" answers:
+- pin: absolute pins (piece shielding its own king from a slider).
+- fork: one piece attacking >= 2 enemy pieces at once.
+- battery: >= 2 aligned same-color sliders with nothing between them.
+- skewer: slider attacks a valuable piece with a cheaper one behind it on the ray.
+- discovered_check / double_check: moves that would produce these (found by trying every
+  legal move) — the answers are moves, unlike the other four which are square patterns.
+
+Ground truth comes from hand-rolled geometric detectors in this file, not from an engine;
+their precise definitions (documented per detector below) ARE the task semantics.
+
+Usage:
+    python dataset/02_motifs.py --puzzle_path data/raw/lichess_db_puzzle.csv \
+        --output_root data/benchmark --N_sample 100
+"""
+
 import argparse
 
 import chess
@@ -16,10 +37,18 @@ from utils import (
 
 
 def is_sliding_piece(piece_type: int) -> bool:
+    """True for the long-range pieces (bishop/rook/queen) that can pin, skewer, or form batteries."""
     return piece_type in [chess.BISHOP, chess.ROOK, chess.QUEEN]
 
 
 def detect_skewers(board):
+    """Find skewers for both colors: (attacker_square, front_square, back_square) triples.
+
+    Definition used: a slider attacks an enemy piece, and continuing along the same ray the
+    first piece behind it is another enemy piece of *strictly lower* value (king counts 100,
+    so king-front skewers always qualify). Both colors are scanned regardless of whose turn
+    it is — the motif is positional, not move-dependent.
+    """
     skewers = []
     for color in [chess.WHITE, chess.BLACK]:
         opponent_color = not color
@@ -34,6 +63,8 @@ def detect_skewers(board):
                     from_file, from_rank, file_step, rank_step = _get_direction_steps(square, front_square)
                     if file_step is None:
                         continue
+                    # Walk the ray beyond the front piece; the first occupied square decides
+                    # (enemy + cheaper = skewer, anything else = blocked, stop either way).
                     to_file, to_rank = chess.square_file(front_square), chess.square_rank(front_square)
                     current_file, current_rank = to_file + file_step, to_rank + rank_step
                     while 0 <= current_file <= 7 and 0 <= current_rank <= 7:
@@ -64,6 +95,7 @@ def detect_skewers(board):
 
 
 def generate_skewer_task(board, found_counter, puzzle_id):
+    """Build an 'identify all skewers' task; answers use the a>b>c square-chain notation."""
     skewers = detect_skewers(board)
     if not skewers:
         return None
@@ -89,6 +121,12 @@ def generate_skewer_task(board, found_counter, puzzle_id):
 
 
 def detect_pins(board: chess.Board) -> list[tuple[str, str, str]]:
+    """Find absolute pins for both colors: (pinning, pinned, king) square triples.
+
+    For each enemy slider, walk each of its movement rays collecting the first two occupied
+    squares; it's a pin exactly when both belong to the opposing side and the second is the
+    king. Only absolute pins (to the king) count — pins to a queen/rook are not detected.
+    """
     pins = []
     for color in [chess.WHITE, chess.BLACK]:
         opponent_color = not color
@@ -134,10 +172,15 @@ def detect_pins(board: chess.Board) -> list[tuple[str, str, str]]:
 
 
 def generate_pin_task(board, found_counter, puzzle_id):
+    """Build an 'identify all absolute pins' task; answers use the a>b>c square-chain notation."""
     pins = detect_pins(board)
     if not pins:
         return None
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
+    # UPSTREAM BUG (kept for reproduction): the second assignment uses "=" instead of "+=",
+    # so the definition sentence above never reaches the prompt — pin tasks ship with only
+    # the format instruction. The checked-in benchmark was generated this way; fixing it
+    # would silently change the task and desync regenerated data from the paper's results.
     task_description = "Identify all absolute pins in this position. An absolute pin occurs when a piece cannot move because it would expose its own king to check."
     task_description = " For each pin, provide the key squares in the format: pinning_piece>pinned_piece>target_piece (e.g., FORMAT_EXAMPLE_PLACEHOLDER).\n"
     suffix = "If more than one, separate with a comma and a space."
@@ -157,6 +200,12 @@ def generate_pin_task(board, found_counter, puzzle_id):
 
 
 def detect_forks(board):
+    """Find forks for both colors: (forking_square, [attacked enemy squares]) pairs.
+
+    Any piece (pawns and kings included) attacking two or more enemy pieces counts; attack
+    maps are raw ``board.attacks`` — pins, legality, and whether the fork wins material are
+    all ignored. That makes this a *pattern recognition* task, not a tactics-quality task.
+    """
     forks = []
     for color in [chess.WHITE, chess.BLACK]:
         opponent_color = not color
@@ -175,6 +224,7 @@ def detect_forks(board):
 
 
 def generate_fork_task(board, found_counter, puzzle_id):
+    """Build an 'identify all forks' task; answers use forker>victim1-victim2 notation."""
     forks = detect_forks(board)
     if not forks:
         return None
@@ -204,6 +254,7 @@ def generate_fork_task(board, found_counter, puzzle_id):
 
 
 def _can_use_line(piece_type, line_type):
+    """True if a piece type moves along the given line type (rook: rank/file, bishop: diagonal, queen: both)."""
     if piece_type == chess.QUEEN:
         return True
     if piece_type == chess.ROOK:
@@ -214,16 +265,23 @@ def _can_use_line(piece_type, line_type):
 
 
 def _yield_rank_lines():
+    """Yield the 8 ranks as ("rank", [squares a-file to h-file]) for battery scanning."""
     for r in range(8):
         yield "rank", [chess.square(f, r) for f in range(8)]
 
 
 def _yield_file_lines():
+    """Yield the 8 files as ("file", [squares rank 1 to 8]) for battery scanning."""
     for f in range(8):
         yield "file", [chess.square(f, r) for r in range(8)]
 
 
 def _yield_diag_lines():
+    """Yield every diagonal of length >= 2 (both directions) for battery scanning.
+
+    Four loops cover: NE-going diagonals starting on rank 1, NE-going starting on the a-file,
+    NW-going starting on rank 1, and NW-going starting on the h-file.
+    """
     for f0 in range(8):
         line = []
         f, r = f0, 0
@@ -263,6 +321,13 @@ def _yield_diag_lines():
 
 
 def detect_batteries(board):
+    """Find batteries: maximal runs of >= 2 same-color sliders on a shared line, nothing between.
+
+    Scans every rank/file/diagonal. A run starts at a slider that can move along that line
+    type and extends through empty squares to further compatible friendly sliders; any other
+    piece breaks the run. Each battery is reported as the ordered list of its pieces' square
+    names, de-duplicated across lines at the end.
+    """
     batteries = []
     for line_type, line in list(_yield_rank_lines()) + list(_yield_file_lines()) + list(_yield_diag_lines()):
         i = 0
@@ -276,6 +341,8 @@ def detect_batteries(board):
             if not _can_use_line(p.piece_type, line_type):
                 i += 1
                 continue
+            # Extend the run: skip empty squares; a compatible friendly slider joins the run,
+            # any other piece ends it.
             run = [sq]
             j = i + 1
             while j < len(line):
@@ -309,6 +376,7 @@ def detect_batteries(board):
 
 
 def generate_battery_task(board, found_counter, puzzle_id):
+    """Build an 'identify every battery' task; answers chain each battery's squares with '>'."""
     batteries = detect_batteries(board)
     if not batteries:
         return None
@@ -333,6 +401,11 @@ def generate_battery_task(board, found_counter, puzzle_id):
 
 
 def _get_direction_steps(from_square, to_square):
+    """Return (from_file, from_rank, file_step, rank_step) unit direction between two squares.
+
+    Steps are each -1/0/+1; returns all-None when the squares don't share a rank, file, or
+    diagonal (i.e. no slider could travel between them).
+    """
     from_file, from_rank = chess.square_file(from_square), chess.square_rank(from_square)
     to_file, to_rank = chess.square_file(to_square), chess.square_rank(to_square)
     file_diff, rank_diff = to_file - from_file, to_rank - from_rank
@@ -344,6 +417,7 @@ def _get_direction_steps(from_square, to_square):
 
 
 def get_ray_between(from_square, to_square):
+    """Return the squares strictly between two aligned squares (empty list if not aligned)."""
     if from_square == to_square:
         return []
     from_file, from_rank, file_step, rank_step = _get_direction_steps(from_square, to_square)
@@ -361,6 +435,14 @@ def get_ray_between(from_square, to_square):
 
 
 def detect_discovered_check_moves(board):
+    """Find moves for the side to move that give discovered check: (from, to, checker) triples.
+
+    A discovered check means: after the move, some checker is (a) not the piece that just
+    moved, (b) a friendly slider, and (c) was blocked *only* by the moved piece beforehand —
+    verified by checking the moved piece sat on the checker->king ray with no other blockers
+    on the pre-move board. Unlike the static motif detectors, this searches moves, so only
+    the side to move is considered.
+    """
     results = []
     color = board.turn
     opp = not color
@@ -403,6 +485,7 @@ def detect_discovered_check_moves(board):
 
 
 def generate_discovered_check_task(board, found_counter, puzzle_id):
+    """Build an 'identify all discovered-check moves' task; answers are UCI moves."""
     moves = detect_discovered_check_moves(board)
     if not moves:
         return None
@@ -429,6 +512,7 @@ def generate_discovered_check_task(board, found_counter, puzzle_id):
 
 
 def detect_double_check_moves(board):
+    """Find moves that give double check (>= 2 checkers afterwards): (from, to, checkers) triples."""
     results = []
     for mv in list(board.legal_moves):
         from_sq = mv.from_square
@@ -459,6 +543,7 @@ def detect_double_check_moves(board):
 
 
 def generate_double_check_task(board, found_counter, puzzle_id):
+    """Build an 'identify all double-check moves' task; answers are UCI moves."""
     moves = detect_double_check_moves(board)
     if not moves:
         return None
@@ -483,6 +568,13 @@ def generate_double_check_task(board, found_counter, puzzle_id):
 
 
 def find_tactical_tasks(unique_positions, data, cfg):
+    """Drive the six motif generators until each has cfg.N_sample tasks.
+
+    Same driver pattern as 01_structural: one task max per puzzle position (first generator
+    that fires wins, then ``break``), with ``unique_positions`` shared across generators to
+    keep positions distinct. Note: no try/except here — the generators' asserts can't fire
+    because each returns None before building an empty answer.
+    """
     found = []
     found_counter = {"pin": 0, "fork": 0, "battery": 0, "skewer": 0, "discovered_check": 0, "double_check": 0}
     task_generators = {
@@ -515,6 +607,7 @@ def find_tactical_tasks(unique_positions, data, cfg):
 
 
 def parse_args():
+    """Parse CLI flags. Defaults use the upstream repo layout — pass explicit paths in this repo."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--puzzle_path", type=str, default="../../data/raw/lichess_db_puzzle.csv")
     parser.add_argument("--output_root", type=str, default="../../data/benchmark")
@@ -524,6 +617,7 @@ def parse_args():
 
 
 def main():
+    """Generate the Motifs benchmark file: seed, load puzzles, run detectors, write JSONL."""
     cfg = parse_args()
     seed_everything(cfg.seed)
     data = read_puzzles(cfg.puzzle_path)

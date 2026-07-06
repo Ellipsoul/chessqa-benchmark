@@ -1,3 +1,31 @@
+"""Generator for the Semantic category (benchmark/semantic.jsonl).
+
+Top rung of the abstraction ladder: connecting positions to natural-language chess
+understanding. Given a FEN and a move, pick which of four commentary snippets actually
+describes that position/move (MCQ, answer A-D).
+
+Input is ``comment_dataset.final.json`` — real annotator commentary already filtered,
+cleaned, and quality-judged by the offline vLLM pipeline (05_1 -> 05_2 -> 05_3). This
+script only assembles MCQs from it. Regenerating from post-training-cutoff commentary
+doubles as a contamination control.
+
+Four variants, differing only in how distractor comments are chosen — a built-in probe of
+whether models pick answers by superficial cues:
+- easy_random: distractors drawn uniformly (baseline; superficial cues suffice).
+- keyword: distractors share extracted keywords with the correct comment.
+- piece_stage: distractors involve the same moving piece and game phase (opening/middle/end).
+- embedding: distractors are nearest neighbors by sentence-embedding cosine similarity
+  (hardest — distractors are *about* similar situations).
+
+Each variant falls back to random fill when its strategy yields too few distractors.
+
+Extra dependencies beyond requirements.txt: sentence-transformers (requirements-optional.txt).
+
+Usage:
+    python dataset/05_semantic.py --input <comment_dataset.final.json> \
+        --output_root data/benchmark --cache_dir <embedding-cache-dir>
+"""
+
 import argparse
 import json
 import random
@@ -19,7 +47,9 @@ from utils import (
 
 
 def normalize_comment_text(text: str) -> str:
-    """Clean comment text."""
+    """Normalize commentary for display/embedding: strip zero-width chars, convert
+    non-breaking spaces, and replace chess figurine glyphs (private-use codepoints used
+    by annotation software) with K/Q/R/B/N/P letters."""
     if not text:
         return ""
 
@@ -47,7 +77,8 @@ def normalize_comment_text(text: str) -> str:
 
 
 def _stage_bucket(move_number: int, opening_threshold: int = 12, middlegame_threshold: int = 30) -> str:
-    """Get game phase bucket."""
+    """Bucket a move number into opening/middlegame/endgame (crude but only used to match
+    distractors to a similar game phase); unparseable move numbers fall into 'opening'."""
     try:
         n = int(move_number)
     except Exception:
@@ -60,7 +91,8 @@ def _stage_bucket(move_number: int, opening_threshold: int = 12, middlegame_thre
 
 
 def _build_indices(items: list[dict[str, Any]], cfg):
-    """Build search indices."""
+    """Build inverted indices (keyword -> item ids, piece -> ids, (piece, stage) -> ids)
+    so the keyword/piece_stage distractor strategies can look up candidates in O(1)."""
     by_keyword = {}
     by_piece = {}
     by_piece_stage = {}
@@ -83,7 +115,7 @@ def _build_indices(items: list[dict[str, Any]], cfg):
 
 
 def _pick_random(pool: list[int], exclude: set, k: int) -> list[int]:
-    """Pick k random items from pool excluding certain indices."""
+    """Pick k random indices from pool, excluding given ones (returns fewer if pool is small)."""
     choices = [idx for idx in pool if idx not in exclude]
     if len(choices) <= k:
         random.shuffle(choices)
@@ -92,7 +124,11 @@ def _pick_random(pool: list[int], exclude: set, k: int) -> list[int]:
 
 
 def _get_neighbors(idx: int, items: list[dict[str, Any]], indices: dict, k: int, strategy: str, cfg) -> list[int]:
-    """Get neighbors using different strategies."""
+    """Return up to k distractor candidates related to item ``idx`` by the given strategy
+    (shared keyword / same moving piece / same piece and game phase), self excluded.
+
+    ``indices`` must be the inverted index matching the strategy (from _build_indices).
+    """
     if strategy == "keyword":
         kws = [str(x).strip().lower() for x in (items[idx].get("keywords") or []) if str(x).strip()]
         cand = set()
@@ -120,7 +156,11 @@ def _get_neighbors(idx: int, items: list[dict[str, Any]], indices: dict, k: int,
 
 
 def _ensure_unique_options(base_opts: list[str], need: int, all_items: list[dict], exclude_indices: set) -> list[str]:
-    """Ensure we have enough unique options."""
+    """De-duplicate the option texts and top up with random comments until ``need`` options.
+
+    Duplicates can occur when two source games share commentary; the random top-up keeps
+    every MCQ at exactly num_options choices regardless of the distractor strategy's yield.
+    """
     options = list(dict.fromkeys([o for o in base_opts if o]))  # Remove duplicates and empty
 
     if len(options) < need:
@@ -140,7 +180,13 @@ def _ensure_unique_options(base_opts: list[str], need: int, all_items: list[dict
 
 
 def _compute_embeddings(items: list[dict[str, Any]], cfg) -> np.ndarray:
-    """Compute or load cached embeddings for comment texts."""
+    """Compute (or load from cache) L2-normalized sentence embeddings for every comment.
+
+    The cache under cfg.cache_dir is keyed by item count + model name in a sidecar JSON;
+    any mismatch triggers a full recompute. Normalized embeddings mean a plain dot product
+    is cosine similarity (used by _get_semantic_neighbors). Embedding all comments is
+    required even for non-embedding variants because main() computes this unconditionally.
+    """
     cache_dir = Path(cfg.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     emb_path = cache_dir / "comment_embeddings.npy"
@@ -187,7 +233,8 @@ def _compute_embeddings(items: list[dict[str, Any]], cfg) -> np.ndarray:
 
 
 def _get_semantic_neighbors(idx: int, embeddings: np.ndarray, cfg, k: int = None) -> list[int]:
-    """Get semantic neighbors using cosine similarity."""
+    """Return the k most cosine-similar comments to item ``idx`` (self excluded), most
+    similar first — argpartition keeps this O(n) rather than a full sort."""
     if embeddings is None:
         return []
 
@@ -210,7 +257,12 @@ def _get_semantic_neighbors(idx: int, embeddings: np.ndarray, cfg, k: int = None
 def generate_comment_mcq_task(
     item: dict[str, Any], variant: str, options: list[str], idx: int
 ) -> ChessQuestionAnsweringTask:
-    """Generate a single MCQ comment task."""
+    """Assemble one MCQ task: shuffle the options, letter them A-D, record the correct letter.
+
+    CONTEXT_PLACEHOLDER is stripped — the commentary itself describes the position, so
+    injecting a piece arrangement would partially give the answer away. The correct option's
+    text and the full option list are kept in metadata for later analysis.
+    """
 
     # Build context information
     fen_before = item.get("fen_before", "")
@@ -261,7 +313,12 @@ def generate_comment_mcq_task(
 def find_comment_tasks_by_variant(
     items: list[dict[str, Any]], variant: str, cfg, embeddings: np.ndarray
 ) -> list[ChessQuestionAnsweringTask]:
-    """Generate comment MCQ tasks for a specific variant."""
+    """Generate up to cfg.N_sample_mcq MCQ tasks for one distractor-strategy variant.
+
+    Per candidate item: gather distractors via the variant's strategy, fall back to random
+    fill when short (see module docstring), then keep the task only if exactly
+    cfg.num_options unique options survived including the correct comment.
+    """
 
     # Build indices for neighbor finding
     by_keyword, by_piece, by_piece_stage = _build_indices(items, cfg)
@@ -353,6 +410,8 @@ def find_comment_tasks_by_variant(
 
 
 def parse_args():
+    """Parse CLI flags (self-documenting via help strings). Defaults use the upstream layout —
+    pass explicit paths in this repo."""
     parser = argparse.ArgumentParser(description="Generate comment MCQ tasks with multiple distractor strategies")
 
     # Input/Output paths
@@ -448,6 +507,7 @@ def parse_args():
 
 
 def main():
+    """Generate the Semantic benchmark file: load comments, embed, build all four MCQ variants."""
     cfg = parse_args()
     seed_everything(cfg.seed)
 

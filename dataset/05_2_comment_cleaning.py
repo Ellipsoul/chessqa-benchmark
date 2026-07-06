@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
-"""
-clean_comments_vllm.py — Offline vLLM cleaner for chess comments.
+"""Stage 2 of the offline commentary pipeline feeding the Semantic category.
+
+Pipeline: 05_1 (extract+filter) -> 05_2 (LLM cleaning, this file) -> 05_3 (LLM quality
+judging) -> comment_dataset.final.json -> 05_semantic.py (MCQ assembly). This stage needs a
+GPU: it runs a local model offline via vLLM (not part of requirements.txt — install torch
+and vllm separately). Its purpose is de-identification: player names would let a model
+answer Semantic MCQs by recognizing famous games instead of understanding the position.
+
+Offline vLLM cleaner for chess comments.
 
 Rules per comment (strict):
 1) If the comment mentions either player of the game, replace those mentions with "White" or "Black".
@@ -50,6 +57,11 @@ def _setup_env(
     attention_backend: str = None,
     use_flashinfer: bool | None = False,
 ) -> None:
+    """Set vLLM environment knobs before engine construction (they are read at import/init).
+
+    setdefault is used throughout so anything the user already exported wins; gemma-3 gets
+    FLASH_ATTN forced because its default backend was broken at the time of writing.
+    """
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -74,6 +86,7 @@ def _setup_env(
 
 
 def load_comments(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
+    """Load the stage-1 JSON array, optionally truncated to max_records for quick test runs."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
@@ -84,6 +97,7 @@ def load_comments(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
 
 
 def save_comments(path: Path, items: list[dict[str, Any]]) -> None:
+    """Write the cleaned records as a pretty-printed JSON array, creating parent dirs."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
@@ -195,6 +209,12 @@ def _annotator_side(item: dict[str, Any]) -> str | None:
 
 
 def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
+    """Build the chat prompt for one comment: system rules + two few-shot turns + the comment.
+
+    The few-shot pair demonstrates both outcomes: a nickname of a third party ("Ety") -> SKIP,
+    and a player-name mention ("Levon") -> replaced with the side. When the annotator *is*
+    one of the players, an extra rule asks for first-person pronouns to be rewritten too.
+    """
     comment = item.get("comment", "").strip()
     comment = normalize_weird_symbols(comment)
     comment = strip_pgn_markup(comment)
@@ -204,7 +224,9 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
     w_first, w_last, w_tokens = split_name(white)
     b_first, b_last, b_tokens = split_name(black)
 
-    # Provide explicit tokens to help the model match partial mentions
+    # NOTE (upstream dead code, kept as-is): these sorted() results are discarded — the alias
+    # lists were presumably once embedded in the prompt. The actual alias substitution happens
+    # deterministically after inference via apply_alias_replacements in perform_cleaning.
     sorted({t for t in [white, w_first, w_last] + w_tokens if t}, key=lambda s: (-len(s), s.lower()))
     sorted({t for t in [black, b_first, b_last] + b_tokens if t}, key=lambda s: (-len(s), s.lower()))
 
@@ -319,12 +341,16 @@ def sanitize_llm_output(text: str) -> str:
 
 
 def _sorted_aliases(name: str) -> list[str]:
+    """All surface forms of a player name (full/first/last/tokens), longest first so
+    'Aronian, Levon' is replaced before bare 'Levon'."""
     first, last, toks = split_name(name)
     aliases = sorted({t for t in [name, first, last] + toks if t}, key=lambda s: (-len(s), s.lower()))
     return aliases
 
 
 def apply_alias_replacements(text: str, aliases: list[str], replacement: str) -> str:
+    """Deterministic belt-and-braces pass replacing any remaining player-name aliases the
+    LLM missed (case-insensitive, bounded so 'So' won't match inside 'Some')."""
     out = text
     for alias in aliases:
         # Word-ish boundaries: do not match inside larger alpha sequences
@@ -439,7 +465,11 @@ def perform_cleaning(
 
 
 def main() -> int:
+    """CLI entry: load stage-1 records, clean via vLLM, drop SKIPs, write stage-2 JSON.
 
+    Kept records gain ``original_comment`` and ``cleaned_comment`` fields, and ``comment``
+    is overwritten with the cleaned text for downstream stages.
+    """
     default_input = Path("../../data/mid/comment_dataset.json")
     default_output = Path("../../data/mid/comment_dataset.cleaned.json")
 

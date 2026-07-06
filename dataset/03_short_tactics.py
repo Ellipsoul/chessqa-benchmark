@@ -1,3 +1,26 @@
+"""Generator for the Short Tactics category (benchmark/short_tactics.jsonl).
+
+Third rung of the abstraction ladder — and empirically the hardest category (paper mean
+17.4%): find the single best move in a Lichess tactics puzzle. Unlike Structural/Motifs,
+the answer requires calculation, not just reading the board.
+
+Two samplings of the same underlying task ("best move in UCI"):
+- short_tactics_rating_{beginner,intermediate,advanced,expert}: stratified by puzzle Elo
+  (<=999 / <=1499 / <=1999 / 2000+), N_sample_rating each — measures difficulty scaling.
+- short_tactics_theme_<theme>: stratified by tactical theme from a curated theme list
+  (see preprocess.py / all_themes_to_include.json), N_sample_theme each — measures
+  per-motif calculation ability.
+
+Quality filters: low rating deviation (stable Elo estimate), high popularity (community
+agreement the puzzle is sound), and short solutions (max_pv_length <= 4 plies, so "best
+move" is sharply defined). The setup move is applied via make_pre_move, and only the first
+solution move is asked for — Lichess guarantees it is the unique winning move (or mate).
+
+Usage:
+    python dataset/03_short_tactics.py --puzzle_path data/raw/lichess_db_puzzle.csv \
+        --all_themes_path <all_themes_to_include.json> --output_root data/benchmark
+"""
+
 import argparse
 import json
 
@@ -15,7 +38,7 @@ from utils import (
 
 
 def rating_to_level(rating):
-
+    """Bucket a Lichess puzzle Elo into beginner/intermediate/advanced/expert difficulty bands."""
     if rating <= 999:
         return "beginner"
     elif rating <= 1499:
@@ -27,7 +50,15 @@ def rating_to_level(rating):
 
 
 def find_puzzles_by_rating(unique_puzzles, data, cfg):
+    """Collect cfg.N_sample_rating best-move tasks per difficulty band.
 
+    Iterates the shuffled puzzle table, applying the quality filters (rating deviation,
+    popularity, solution length), skipping already-used puzzles, and filling each band
+    until full. The full solution line is kept in metadata (``pv``) even though only the
+    first move is the answer — useful later for reasoning-trace analysis.
+
+    Returns ``(tasks, unique_puzzles)`` so the theme pass can keep excluding these puzzles.
+    """
     found = []
     found_counter = {"beginner": 0, "intermediate": 0, "advanced": 0, "expert": 0}
 
@@ -87,7 +118,12 @@ def find_puzzles_by_rating(unique_puzzles, data, cfg):
 
 
 def find_puzzles_by_theme(unique_puzzles, data, cfg):
+    """Collect cfg.N_sample_theme best-move tasks per curated tactical theme.
 
+    Same filtering as the rating pass. A puzzle usually carries several theme tags; it is
+    assigned to the first still-unfilled tag it intersects (iteration order of the set —
+    fixed by PYTHONHASHSEED via seed_everything), recorded as ``primary_theme`` in metadata.
+    """
     with open(cfg.all_themes_path) as f:
         all_themes_to_include = set(json.load(f))
 
@@ -157,7 +193,7 @@ def find_puzzles_by_theme(unique_puzzles, data, cfg):
 
 
 def parse_args():
-
+    """Parse CLI flags. Defaults use the upstream repo layout — pass explicit paths in this repo."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--puzzle_path", type=str, default="../../data/raw/lichess_db_puzzle.csv")
     parser.add_argument("--all_themes_path", type=str, default="../../data/info/all_themes_to_include.json")
@@ -173,7 +209,7 @@ def parse_args():
 
 
 def main():
-
+    """Generate the Short Tactics benchmark file: rating-stratified pass, then theme pass."""
     cfg = parse_args()
     seed_everything(cfg.seed)
     data = read_puzzles(cfg.puzzle_path)

@@ -1,3 +1,37 @@
+"""ChessQA evaluation runner: benchmark JSONL -> OpenRouter -> scored results.
+
+The single-file harness used for all of the paper's 23 runs. End-to-end flow:
+
+1. Load every ``*.jsonl`` under ``--dataset-root`` (optionally subsampled per task type).
+2. Resume: match tasks against the existing results file by ``task_id``; only unfinished
+   tasks (plus previous ``max_token_reached`` failures) are re-run. ``--no-resume`` skips this.
+3. For each task, ``format_prompt`` resolves the placeholders baked into the question
+   (CONTEXT_PLACEHOLDER, FORMAT_EXAMPLE_PLACEHOLDER) according to ``--add-context`` and
+   ``--use-format-example-group``.
+4. Fan out over a ``multiprocessing.Pool`` (``--workers``); each worker POSTs to the
+   OpenRouter chat completions API with retries, and pulls thinking traces out of the
+   response's ``reasoning``/``reasoning_details`` fields when present.
+5. ``extract_answer`` takes the last ``FINAL ANSWER:`` line (with ``\\boxed{}`` fallback);
+   ``evaluate_answer_with_error_type`` scores it (exact match for "single", set match for
+   "multi") and classifies failures. Note this classifies *answers only* — nothing inspects
+   the reasoning trace (that gap is this project's Phase 3).
+
+Outputs, all under ``--output-dir`` and all named ``<model with / and : -> _>`` plus
+variant suffixes ``-thinking`` / ``-piecearr`` / ``-fmt2`` (flags must match for resume and
+``--eval-only`` to find the file):
+- ``<name>.jsonl``  one result per line: the full task + an ``inference`` block
+  (prompt, response, thinking_content, extracted answer, correctness, error_type, usage).
+- ``<name>_pretty.json``  same content, indented for humans.
+- ``<name>_stats.json``  aggregate accuracy/cost/error-type/per-category stats.
+
+API key: read from ``../keys/api_keys.json`` relative to the repo root (i.e. a ``keys/``
+directory *beside* the checkout), expecting ``{"openrouter_api_key": "..."}``. The
+OPENROUTER_API_KEY environment variable is NOT read, despite what the upstream README says.
+
+``--eval-only`` re-runs steps 5+ on an existing results file without any API calls —
+useful after changing extraction/scoring logic.
+"""
+
 import argparse
 import json
 import random
@@ -15,7 +49,11 @@ from tqdm import tqdm
 def load_tasks(
     dataset_root: Path, max_tasks: int | None = None, n_samples_per_task: int | None = None
 ) -> list[dict[str, Any]]:
-    """Load tasks from all JSONL files in dataset root directory with optional sampling per task type."""
+    """Load tasks from all JSONL files in dataset root directory with optional sampling per task type.
+
+    ``n_samples_per_task`` shuffles within each task_type and keeps the first N;
+    ``max_tasks`` then truncates the combined list (applied after sampling).
+    """
     tasks = []
 
     # Find all JSONL files in the dataset root
@@ -53,7 +91,9 @@ def load_tasks(
         sampled_tasks = []
         for task_type, type_tasks in tasks_by_type.items():
             if len(type_tasks) > n_samples_per_task:
-                # Use random sampling with a fixed seed for reproducibility
+                # Upstream comment claimed "fixed seed for reproducibility", but no seed is
+                # ever set in this script — subsampled runs draw a different task subset each
+                # invocation. Only relevant with --N-samples-per-task; full runs are unaffected.
                 random.shuffle(type_tasks)
                 sampled = type_tasks[:n_samples_per_task]
             else:
@@ -70,10 +110,15 @@ def load_tasks(
 
 
 def get_context(fen: str) -> str:
-    """Generate chess context from FEN.
+    """Build the --add-context injection string: piece arrangement + legal moves for a FEN.
+
+    This is the paper's key intervention — handing the model an explicit board state to
+    bypass FEN-parsing/board-hallucination failures. Note the arrangement here lists pieces
+    in board-scan order (a1..h8), unlike the alphabetical-by-piece-type ordering that
+    piece_arrangement *answers* require (dataset/utils.get_piece_arrangement).
 
     Some dataset entries append move hints after a pipe ("|") like:
-    "<FEN> | e2e4 e7e5". Strip that part before parsing.
+    "<FEN> | e2e4 e7e5". Strip that part before parsing. Returns "" if the FEN is unparseable.
     """
     fen_clean = fen.split("|", 1)[0].strip()
     try:
@@ -104,7 +149,12 @@ def get_context(fen: str) -> str:
 
 
 def format_prompt(task: dict[str, Any], add_context: bool = False, format_example_group: int = 1) -> str:
-    """Format task into prompt."""
+    """Resolve a task's question template into the final prompt string.
+
+    CONTEXT_PLACEHOLDER becomes the get_context block (or "" without --add-context);
+    FORMAT_EXAMPLE_PLACEHOLDER becomes format_examples[0] or [1] depending on
+    ``format_example_group`` — the mechanism behind the paper's format-sensitivity variant.
+    """
     question = task["question"]
 
     if add_context and "input" in task:
@@ -127,7 +177,16 @@ def format_prompt(task: dict[str, Any], add_context: bool = False, format_exampl
 
 
 def extract_answer(response: str) -> tuple[str, bool]:
-    """Extract final answer and return whether extraction was successful."""
+    """Pull the model's answer out of its response text.
+
+    Primary: the *last* ``FINAL ANSWER: ...`` line (case-insensitive; last wins because
+    models sometimes restate the header while reasoning). Fallback: the last
+    ``The final answer is \\boxed{...}`` (some models default to this despite instructions).
+
+    Returns ``(answer, True)`` or ``("", False)``; the False case is scored as
+    ``format_error`` downstream, so extraction robustness directly shapes the paper's
+    "format following rate" metric.
+    """
     # Look for the last occurrence of FINAL ANSWER: in the response
     matches = list(re.finditer(r"FINAL ANSWER:\s*(.+?)(?:\n|$)", response, re.IGNORECASE | re.DOTALL))
     if matches:
@@ -152,7 +211,8 @@ def extract_answer(response: str) -> tuple[str, bool]:
 
 
 def calculate_total_usage(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Calculate total usage statistics from results."""
+    """Aggregate cost/token/extraction stats across results (a result with no usage dict
+    counts as an API error). Costs come from OpenRouter's usage accounting per call."""
     total_cost = 0.0
     total_prompt_tokens = 0
     total_completion_tokens = 0
@@ -211,6 +271,11 @@ def evaluate_answer_with_error_type(
     - "multi_extra_items": Multi-answer has extra incorrect items
     - "multi_missing_items": Multi-answer is missing required items
     - "multi_false_items": Multi-answer has false items instead of correct ones
+
+    Comparison is case-insensitive after whitespace stripping; "multi" answers are
+    comma-split and compared as sets, so order never matters. Precedence:
+    max_token_reached > format_error > correctness — a truncated response is blamed on the
+    token budget even if an answer happened to be extracted.
     """
 
     # Check for max token reached first (highest priority)
@@ -260,7 +325,13 @@ def evaluate_answer_with_error_type(
 
 
 def process_single_task(args_tuple):
-    """Process a single task - for multiprocessing."""
+    """Worker entry point: run one task end-to-end (format -> call -> extract -> score).
+
+    Takes a flat tuple because multiprocessing.Pool.imap pickles arguments; each worker
+    builds its own OpenrouterInferencer with the api_key passed in explicitly (avoiding a
+    re-read of the key file per task). Returns the original task dict + an ``inference``
+    block — the record that becomes one line of the results JSONL.
+    """
     task, model, add_context, format_example_group, api_key, max_retries, timeout, max_tokens, enable_thinking = (
         args_tuple
     )
@@ -306,6 +377,15 @@ def _build_variant_suffix(add_context: bool, format_example_group: int) -> str:
 
 
 class OpenrouterInferencer:
+    """Thin client around the OpenRouter chat completions API plus result-file management.
+
+    Holds the run configuration (model, retries, token budget, thinking mode, filename
+    suffix) and owns three concerns: calling the API with retries (``call_model``),
+    orchestrating sequential/parallel inference (``run_inference``), and incremental
+    result persistence (``_save_*``). Construction reads the API key from
+    ``../keys/api_keys.json`` relative to the repo root — see the module docstring.
+    """
+
     def __init__(
         self,
         model: str,
@@ -331,7 +411,22 @@ class OpenrouterInferencer:
         self.url = "https://openrouter.ai/api/v1/chat/completions"
 
     def call_model(self, prompt: str) -> tuple[str, str, dict[str, Any]]:
-        """Call model with exponential retry. Returns (content, thinking_content, usage)."""
+        """POST one chat completion with exponential-backoff retries.
+
+        Request notes:
+        - ``usage: {include: true}`` asks OpenRouter to return per-call cost accounting.
+        - ``--enable-thinking`` maps to ``reasoning: {effort: "medium"}`` (the paper's
+          setting); thinking models get the full ``max_tokens`` as their budget.
+        - A few models get hardcoded provider-order overrides below — upstream pinned
+          providers whose responses (esp. reasoning traces) were reliable for that model.
+
+        Returns ``(content, thinking_content, usage)``. ``thinking_content`` is best-effort:
+        OpenRouter surfaces reasoning either as ``message.reasoning`` (string) or
+        ``message.reasoning_details`` (list of dicts with "text"); whether it is the FULL
+        trace or a summary depends on the provider — the fidelity question that gates
+        Phase 3. After exhausting retries the content is the literal string "ERROR: ...",
+        which resume logic later treats as incomplete.
+        """
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
         data = {
@@ -380,7 +475,9 @@ class OpenrouterInferencer:
                 thinking_content = ""
                 message = result["choices"][0]["message"]
 
-                # Try different reasoning extraction methods
+                # Try different reasoning extraction methods.
+                # (The first branch is vestigial: ``message`` is a dict, so hasattr() is
+                # always False and the third branch is what actually catches ``reasoning``.)
                 if hasattr(message, "reasoning") and message.get("reasoning"):
                     thinking_content = message["reasoning"]
                 elif "reasoning_details" in message and message["reasoning_details"]:
@@ -414,7 +511,15 @@ class OpenrouterInferencer:
         existing_results: list[dict[str, Any]] = None,
         save_existing_first: bool = False,
     ) -> list[dict[str, Any]]:
-        """Run inference on tasks with optional multiprocessing."""
+        """Run inference on tasks, saving incrementally; returns results in input task order.
+
+        ``num_workers == 1`` runs sequentially in-process; otherwise a multiprocessing.Pool
+        fans out via process_single_task. Every ``save_interval`` completions a batch is
+        appended to the results JSONL (parallel mode only appends once all results up to
+        that point have arrived, since imap yields in submission order). When resuming,
+        ``save_existing_first`` rewrites the file with the already-complete results so the
+        appends produce one coherent file.
+        """
         if existing_results is None:
             existing_results = []
 
@@ -526,7 +631,12 @@ class OpenrouterInferencer:
             return ordered_results
 
     def _save_incremental_results(self, new_results: list[dict[str, Any]], output_path: str):
-        """Append new results to the main results file."""
+        """Append a batch of new results to ``<output_dir>/<model_safe_name><suffixes>.jsonl``.
+
+        The filename encodes the variant (-thinking / -piecearr / -fmt2), which is why the
+        same flags must be passed to resume a run. Failures are warnings, not fatal — the
+        full result set is rewritten at the end of main() anyway.
+        """
         try:
             # Get model name from output path and create model-based filename
             output_dir = Path(output_path)
@@ -555,7 +665,8 @@ class OpenrouterInferencer:
             print(f"\nWarning: Failed to save incremental results: {e}")
 
     def _save_existing_results(self, existing_results: list[dict[str, Any]], output_path: str):
-        """Save existing complete results to start the file."""
+        """Overwrite the results file with previously completed results (resume bootstrap),
+        so subsequent incremental appends continue a coherent file."""
         try:
             # Get model name from output path and create model-based filename
             output_dir = Path(output_path)
@@ -580,7 +691,8 @@ class OpenrouterInferencer:
 
 
 def load_existing_results(results_file: Path) -> dict[str, dict[str, Any]]:
-    """Load existing results and return as dict keyed by task_id."""
+    """Load a results JSONL keyed by task_id (empty dict if the file doesn't exist).
+    Duplicate task_ids resolve to the last line, i.e. the most recent attempt."""
     if not results_file.exists():
         return {}
 
@@ -600,7 +712,11 @@ def load_existing_results(results_file: Path) -> dict[str, dict[str, Any]]:
 
 
 def re_evaluate_results(results: list[dict[str, Any]], max_tokens: int) -> list[dict[str, Any]]:
-    """Re-extract answers and re-evaluate existing results."""
+    """Re-run extraction + scoring over saved responses (the --eval-only path).
+
+    Uses only the stored ``response`` text — no API calls — so improved extraction or
+    scoring logic can be re-applied to finished runs for free.
+    """
     re_evaluated = []
 
     for result in results:
@@ -635,7 +751,13 @@ def re_evaluate_results(results: list[dict[str, Any]], max_tokens: int) -> list[
 def filter_incomplete_tasks(
     tasks: list[dict[str, Any]], existing_results: dict[str, dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Filter tasks into incomplete (need inference) and complete (already done)."""
+    """Split tasks into (incomplete -> re-run, complete -> keep) for resume.
+
+    A task counts as complete only if its saved result has a non-empty response that isn't
+    an "ERROR:..." retry-exhaustion marker. Results scored ``max_token_reached`` are
+    deliberately re-run too — truncation is treated as an infrastructure failure worth
+    retrying, not a model answer.
+    """
     incomplete_tasks = []
     complete_results = []
     max_token_retry_count = 0
@@ -670,6 +792,13 @@ def filter_incomplete_tasks(
 
 
 def main():
+    """CLI entry: run (or resume, or re-evaluate) a full benchmark pass and report stats.
+
+    Three modes: --eval-only (rescore an existing results file, no API), resume (default —
+    skip tasks already completed in the matching results file), and --no-resume (fresh run).
+    All modes end identically: rewrite the results JSONL + pretty JSON, compute per-type /
+    per-category / error-type stats into <name>_stats.json, and print the report tables.
+    """
     args = parse_arguments()
 
     # Set num_workers for metadata (used in eval-only mode too)
@@ -993,6 +1122,17 @@ def main():
 
 
 def parse_arguments():
+    """Parse CLI flags.
+
+    Caveats (upstream defaults kept as-is; several help strings are stale relative to the
+    actual defaults — trust the ``default=`` values):
+    - Path defaults resolve two directories above this script (upstream's layout), which
+      lands *outside* this repo — always pass --dataset-root benchmark --output-dir results.
+    - --workers defaults to 256 (help says 8); --max-retries to 10 (help says 5);
+      --timeout to 6000s (help says 60).
+    - The commented-out --model lines are upstream's roster of evaluated models, kept as a
+      convenient reference for reproduction runs.
+    """
     parser = argparse.ArgumentParser()
 
     script_dir = Path(__file__).parent

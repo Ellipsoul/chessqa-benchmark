@@ -1,3 +1,21 @@
+"""Shared utilities for the ChessQA dataset generators (dataset/0N_*.py).
+
+This module sits at the front of the data flow:
+
+    raw Lichess dumps -> dataset/0N_*.py generators -> benchmark JSONL -> eval/run_openrouter.py
+
+It provides the pieces every generator needs:
+
+- ``ChessQuestionAnsweringTask``: the task record schema serialized into the benchmark JSONL.
+- ``FORMAT_EXAMPLES_*`` constants: the two answer-format examples embedded in each task
+  (the eval runner picks one via ``--use-format-example-group`` to test format sensitivity).
+- FEN/board helpers (``get_piece_arrangement``, ``fen_to_pieces``, ``get_piece_name``) used both
+  to build questions and to inject board-state context at inference time (``--add-context``).
+- ``construct_prompt``: assembles a question with the literal placeholder strings that the eval
+  runner substitutes at inference time (see ``format_prompt`` in eval/run_openrouter.py).
+- I/O and reproducibility helpers (``save_tasks``, ``read_puzzles``, ``seed_everything``).
+"""
+
 import json
 import os
 import random
@@ -8,6 +26,13 @@ import chess
 import numpy as np
 import pandas as pd
 
+# Each FORMAT_EXAMPLES_* list holds exactly two example answers for one answer syntax.
+# They are stored per-task in `format_examples` and resolved into the prompt at inference
+# time (FORMAT_EXAMPLE_PLACEHOLDER), so a single benchmark file supports two prompt variants.
+# Notation used by the examples:
+#   ","  separates multiple answers in a multi-answer task ("multi" answer_type, set-compared)
+#   ">"  chains squares along a line/battery (e.g. "d1>d7>d8" = piece path through squares)
+#   "-"  separates the two forked targets in a fork answer (e.g. "e5>e7-f6")
 FORMAT_EXAMPLES_UCI_MOVE = ["e2e4, c2b1q", "g1f3, a2a1q"]
 FORMAT_EXAMPLES_UCI_MOVE_SAME_START = ["e2e3, e2e4", "d7d5, d7d6"]
 FORMAT_EXAMPLES_LINE = ["d1>d7>d8, a2>e2>h2", "a5>e5>h5, h1>h4>h7"]
@@ -27,6 +52,9 @@ FORMAT_EXAMPLES_ARRANGEMENT = [
 FORMAT_EXAMPLES_MCQ = ["A", "D"]
 
 
+# Maps python-chess (piece_type, color) pairs to the human-readable names used in prompts
+# and piece-arrangement strings. Kept as a module-level table so wording is identical
+# everywhere it appears (prompt text is part of the benchmark contract).
 PIECE_NAMES = {
     (chess.PAWN, chess.WHITE): "White Pawn",
     (chess.KNIGHT, chess.WHITE): "White Knight",
@@ -44,11 +72,20 @@ PIECE_NAMES = {
 
 
 def get_piece_arrangement(fen):
-    """Get the complete piece arrangement from a FEN string.
+    """Render a FEN as a human-readable piece-arrangement string.
 
-    Returns pieces in order: White pieces first (King, Queen, Rook, Bishop, Knight, Pawn)
-    followed by Black pieces (King, Queen, Rook, Bishop, Knight, Pawn).
-    Squares are listed in alphabetical order for each piece type.
+    This is the string injected into prompts by ``--add-context`` — the paper's key
+    intervention showing that spelling out the board state significantly improves scores
+    (i.e. board-state hallucination is a core bottleneck).
+
+    Args:
+        fen: Position in Forsyth-Edwards Notation.
+
+    Returns:
+        A string like ``"White King: ['e1'], White Queen: ['d1'], ..."`` listing White pieces
+        first (King, Queen, Rook, Bishop, Knight, Pawn), then Black in the same order, with
+        each piece type's squares sorted alphabetically. Piece types absent from the board
+        are omitted entirely. See ``FORMAT_EXAMPLES_ARRANGEMENT`` for full examples.
     """
     board = chess.Board(fen)
 
@@ -91,6 +128,28 @@ def get_piece_arrangement(fen):
 
 @dataclass
 class ChessQuestionAnsweringTask:
+    """One benchmark item; serialized as one JSON line in benchmark/<category>.jsonl.
+
+    Attributes:
+        task_id: Unique id, conventionally ``"<task_type>_<index>"``.
+        task_type: Fine-grained question kind (e.g. ``"piece_arrangement"``, ``"fork"``).
+        task_category: One of the five paper categories (Structural, Motifs, Short Tactics,
+            Position Judgment, Semantic) — the unit results are reported over.
+        input: The position. Usually a bare FEN; some tasks use ``"FEN | uci moves"`` where
+            the moves after ``|`` are to be applied to the FEN (consumers must strip after
+            ``|`` before parsing the FEN itself).
+        question: Prompt text containing the literal placeholders ``CONTEXT_PLACEHOLDER`` and
+            (via the suffix) ``FORMAT_EXAMPLE_PLACEHOLDER``, resolved by the eval runner's
+            ``format_prompt`` at inference time. Keep the placeholders intact in the JSONL.
+        format_examples: Two example answers (one per prompt-variant group); see the
+            ``FORMAT_EXAMPLES_*`` constants.
+        correct_answer: Ground-truth answer string.
+        answer_type: ``"single"`` = exact string match; ``"multi"`` = comma-separated,
+            compared as a set (order-insensitive).
+        metadata: Optional extras for analysis (e.g. source puzzle rating/themes); not
+            shown to the model and not used in scoring.
+    """
+
     task_id: str
     task_type: str
     task_category: str
@@ -103,7 +162,16 @@ class ChessQuestionAnsweringTask:
 
 
 def construct_prompt(prefix, task_description, suffix):
+    """Assemble a task's `question` string with placeholders left unresolved.
 
+    Layout: ``prefix`` (typically names the position/FEN) + ``CONTEXT_PLACEHOLDER`` (replaced
+    at inference time with piece arrangement + legal moves under ``--add-context``, or removed
+    otherwise) + ``task_description`` + fixed chain-of-thought/answer-format boilerplate +
+    ``suffix`` (typically carries ``FORMAT_EXAMPLE_PLACEHOLDER``).
+
+    The ``"FINAL ANSWER: <answer>"`` line mandated here is what the eval runner's extractor
+    looks for when scoring — the two ends of the contract must stay in sync.
+    """
     question = prefix
     question += "CONTEXT_PLACEHOLDER"
     question += task_description
@@ -116,7 +184,19 @@ def construct_prompt(prefix, task_description, suffix):
 
 
 def make_pre_move(row: pd.Series) -> tuple[str, str]:
+    """Advance a Lichess puzzle row by its setup move.
 
+    Lichess puzzle CSVs store the position *before* the opponent's last move: the first entry
+    in ``Moves`` is that setup move, and the puzzle actually starts after it is played.
+    Generators therefore push ``moves[0]`` onto the board and treat ``moves[1]`` as the first
+    solution move.
+
+    Args:
+        row: Puzzle CSV row with ``FEN`` and space-separated UCI ``Moves`` columns.
+
+    Returns:
+        ``(fen_after_setup_move, first_solution_move_uci)``.
+    """
     fen_before = row["FEN"]
     moves = row["Moves"].split(" ")
     board = chess.Board(fen_before)
@@ -128,7 +208,7 @@ def make_pre_move(row: pd.Series) -> tuple[str, str]:
 
 
 def save_tasks(tasks, file_name, cfg):
-
+    """Write tasks as JSONL (one ``ChessQuestionAnsweringTask`` dict per line) under ``cfg.output_root``."""
     if not os.path.exists(cfg.output_root):
         os.makedirs(cfg.output_root)
     output_path = os.path.join(cfg.output_root, file_name)
@@ -140,6 +220,7 @@ def save_tasks(tasks, file_name, cfg):
 
 
 def get_piece_name(piece: chess.Piece) -> str:
+    """Return the prompt-facing name of a piece, e.g. ``"White Queen"``."""
     color_name = "White" if piece.color == chess.WHITE else "Black"
     piece_names = {
         chess.PAWN: "Pawn",
@@ -154,7 +235,11 @@ def get_piece_name(piece: chess.Piece) -> str:
 
 
 def fen_to_pieces(fen):
+    """Map a FEN to ``{"White Queen": ["d1"], ...}`` in board-scan (a1..h8) order.
 
+    Structured counterpart of ``get_piece_arrangement``: same information, but returned as a
+    dict for generators that need to iterate pieces rather than embed a display string.
+    """
     board = chess.Board(fen)
     pieces = {}
     for square in chess.SQUARES:
@@ -189,6 +274,7 @@ def seed_everything(seed):
 
 
 def readable_num(num):
+    """Format a count with a B/M/K suffix for progress logs, e.g. ``1_500_000 -> "1.50M"``."""
     if num >= 1e9:
         return f"{num / 1e9:.2f}B"
     elif num >= 1e6:
@@ -200,6 +286,7 @@ def readable_num(num):
 
 
 def readable_time(elapsed_time):
+    """Format seconds as ``"1h 2m 3.00s"`` / ``"2m 3.00s"`` / ``"3.00s"`` for progress logs."""
     hours, rem = divmod(elapsed_time, 3600)
     minutes, seconds = divmod(rem, 60)
 
@@ -212,7 +299,11 @@ def readable_time(elapsed_time):
 
 
 def read_puzzles(file_path):
+    """Load the Lichess puzzle CSV and shuffle row order.
 
+    The shuffle uses pandas' global random state, so ``seed_everything`` must be called first
+    for reproducible sampling. The CSV is large (~5M rows), hence the timing printouts.
+    """
     t_0 = time.time()
     df = pd.read_csv(file_path)
     t_1 = time.time()

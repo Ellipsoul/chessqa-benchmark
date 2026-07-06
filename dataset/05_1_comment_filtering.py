@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-"""
-comment_dataset_creation.py - Extract a comment-based dataset from a PGN file.
+"""Stage 1 of the offline commentary pipeline feeding the Semantic category.
+
+Pipeline: 05_1 (extract+filter, this file) -> 05_2 (LLM cleaning) -> 05_3 (LLM quality
+judging) -> comment_dataset.final.json -> 05_semantic.py (MCQ assembly). Stages 2-3 need a
+GPU/vLLM; this stage is pure python-chess and runs anywhere.
+
+Extracts a comment-based dataset from a PGN file.
 
 For each comment found on the main line of a game, create an entry with:
   1. comment (raw text)

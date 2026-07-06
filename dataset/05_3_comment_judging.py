@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-"""
-judge_comments_vllm.py — Final relevance filter for cleaned comments using vLLM (offline).
+"""Stage 3 (final) of the offline commentary pipeline feeding the Semantic category.
+
+Pipeline: 05_1 (extract+filter) -> 05_2 (LLM cleaning) -> 05_3 (LLM quality judging, this
+file) -> comment_dataset.final.json -> 05_semantic.py (MCQ assembly). Like stage 2 this
+needs a GPU + vLLM. A cheap regex/keyword heuristic pre-drops obviously irrelevant comments
+before the LLM sees them.
+
+Final relevance filter for cleaned comments using vLLM (offline).
 
 Goal: Keep only comments that are explicitly about the given move/position in this game.
 
@@ -48,6 +54,7 @@ def _setup_env(
     attention_backend: str = None,
     use_flashinfer: bool | None = False,
 ) -> None:
+    """Set vLLM environment knobs before engine construction (same helper as in 05_2)."""
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -67,6 +74,7 @@ def _setup_env(
 
 
 def load_items(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
+    """Load the stage-2 JSON array, optionally truncated to max_records for quick test runs."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
@@ -77,6 +85,7 @@ def load_items(path: Path, max_records: int = 0) -> list[dict[str, Any]]:
 
 
 def save_items(path: Path, items: list[dict[str, Any]]) -> None:
+    """Write kept records as a pretty-printed JSON array, creating parent dirs."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
@@ -137,6 +146,12 @@ GENERIC_PHRASES = [
 
 
 def heuristic_is_relevant(text: str) -> bool:
+    """Cheap pre-filter: True if the comment plausibly discusses concrete chess content.
+
+    Drops: empty/very short comments and ones containing known generic phrases. Keeps:
+    anything with SAN/UCI notation, chess vocabulary, or at least a square name. Only
+    'False' is final here — 'True' just promotes the comment to LLM judging.
+    """
     if not text:
         return False
     t = text.strip()
@@ -159,6 +174,8 @@ def heuristic_is_relevant(text: str) -> bool:
 
 
 def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
+    """Build the KEEP/DROP judging prompt: strict system rules, one few-shot DROP example
+    (a generic aphorism), then the comment with its full game context (FENs, move, PGN)."""
     comment = item.get("cleaned_comment") or item.get("comment", "")
     fen_before = item.get("fen_before", "")
     fen_after = item.get("fen_after", "")
@@ -204,6 +221,8 @@ def build_messages(item: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def sanitize_label(text: str) -> str:
+    """Coerce raw LLM output to exactly "KEEP" or "DROP", defaulting to DROP on anything
+    unparseable (strips think-blocks/backticks, then searches for either label)."""
     if not text:
         return "DROP"
     t = text.strip().strip("` ")
@@ -221,12 +240,12 @@ def sanitize_label(text: str) -> str:
 
 
 def main() -> int:
-    # Compute default paths relative to repo root
-    # script_dir = Path(__file__).parent
-    # repo_root = script_dir.parent.parent
-    # default_input = repo_root / "data" / "comment_tasks" / "comment_dataset.cleaned.json"
-    # default_output = repo_root / "data" / "comment_tasks" / "comment_dataset.final.json"
+    """CLI entry: heuristic pre-filter, vLLM KEEP/DROP judging, write the final dataset.
 
+    Label bookkeeping: ``heuristic_labels`` holds one slot per input item ("DROP" or
+    "CANDIDATE"); after judging, each CANDIDATE slot is overwritten in order with the LLM's
+    verdict, so ``final_labels`` lines up 1:1 with ``items``.
+    """
     default_input = Path("../../data/mid/comment_dataset.cleaned.json")
     default_output = Path("../../data/mid/comment_dataset.final.json")
     ap = argparse.ArgumentParser(description="Judge relevance of cleaned comments using vLLM")
@@ -272,10 +291,12 @@ def main() -> int:
                 heuristic_labels.append("CANDIDATE")
             else:
                 heuristic_labels.append("DROP")
-        # Keep indices for mapping
+        # NOTE (upstream dead code, kept as-is): this comprehension's result is discarded —
+        # the candidate->item mapping is actually reconstructed positionally further down.
         [i for i, lab in enumerate(heuristic_labels) if lab == "CANDIDATE"]
     else:
         to_judge = items
+        # NOTE (upstream dead code, kept as-is): result discarded, same as above.
         list(range(len(items)))
 
     # Setup vLLM

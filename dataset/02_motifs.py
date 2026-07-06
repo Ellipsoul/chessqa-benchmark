@@ -177,12 +177,12 @@ def generate_pin_task(board, found_counter, puzzle_id):
     if not pins:
         return None
     prefix = f"You are given a chess position in FEN: {board.fen()}.\n"
-    # UPSTREAM BUG (kept for reproduction): the second assignment uses "=" instead of "+=",
-    # so the definition sentence above never reaches the prompt — pin tasks ship with only
-    # the format instruction. The checked-in benchmark was generated this way; fixing it
-    # would silently change the task and desync regenerated data from the paper's results.
+    # Fixed relative to upstream, which reassigned ("=") instead of appending ("+=") on the
+    # second line, silently dropping the definition sentence from every pin prompt. The
+    # checked-in benchmark/motifs.jsonl predates this fix, so its pin questions carry only
+    # the format instruction — regenerated data will differ from the paper's on this task.
     task_description = "Identify all absolute pins in this position. An absolute pin occurs when a piece cannot move because it would expose its own king to check."
-    task_description = " For each pin, provide the key squares in the format: pinning_piece>pinned_piece>target_piece (e.g., FORMAT_EXAMPLE_PLACEHOLDER).\n"
+    task_description += " For each pin, provide the key squares in the format: pinning_piece>pinned_piece>target_piece (e.g., FORMAT_EXAMPLE_PLACEHOLDER).\n"
     suffix = "If more than one, separate with a comma and a space."
     answer_parts = [f"{pinning}>{pinned}>{target}" for pinning, pinned, target in pins]
     correct_answer = ", ".join(answer_parts) if answer_parts else "None"

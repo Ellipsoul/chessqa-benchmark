@@ -87,14 +87,17 @@ def load_tasks(
                 tasks_by_type[task_type] = []
             tasks_by_type[task_type].append(task)
 
-        # Sample n_samples_per_task from each type
+        # Sample n_samples_per_task from each type.
+        # Fixed relative to upstream: the shuffle now uses a dedicated fixed-seed RNG, so
+        # repeated --N-samples-per-task runs draw the same subset (upstream claimed a fixed
+        # seed in a comment but used the unseeded global RNG). This also makes resume
+        # coherent for subsampled runs — previously each invocation sampled a different
+        # subset, so resumed runs silently evaluated a mix of subsets.
+        rng = random.Random(42)
         sampled_tasks = []
         for task_type, type_tasks in tasks_by_type.items():
             if len(type_tasks) > n_samples_per_task:
-                # Upstream comment claimed "fixed seed for reproducibility", but no seed is
-                # ever set in this script — subsampled runs draw a different task subset each
-                # invocation. Only relevant with --N-samples-per-task; full runs are unaffected.
-                random.shuffle(type_tasks)
+                rng.shuffle(type_tasks)
                 sampled = type_tasks[:n_samples_per_task]
             else:
                 sampled = type_tasks
@@ -113,9 +116,12 @@ def get_context(fen: str) -> str:
     """Build the --add-context injection string: piece arrangement + legal moves for a FEN.
 
     This is the paper's key intervention — handing the model an explicit board state to
-    bypass FEN-parsing/board-hallucination failures. Note the arrangement here lists pieces
-    in board-scan order (a1..h8), unlike the alphabetical-by-piece-type ordering that
-    piece_arrangement *answers* require (dataset/utils.get_piece_arrangement).
+    bypass FEN-parsing/board-hallucination failures. The arrangement uses the same canonical
+    ordering as piece_arrangement *answers* (dataset/utils.get_piece_arrangement): White then
+    Black, King/Queen/Rook/Bishop/Knight/Pawn, squares alphabetical. (Fixed relative to
+    upstream, which emitted board-scan a1..h8 order — an inconsistency that made the injected
+    context clash with the answer format piece_arrangement tasks demand. Paper --add-context
+    runs used the old ordering, so piecearr variants are not byte-comparable to upstream.)
 
     Some dataset entries append move hints after a pipe ("|") like:
     "<FEN> | e2e4 e7e5". Strip that part before parsing. Returns "" if the FEN is unparseable.
@@ -142,7 +148,12 @@ def get_context(fen: str) -> str:
                 pieces[key] = []
             pieces[key].append(chess.square_name(square))
 
-    arrangement = ", ".join(f"{k}: {v}" for k, v in pieces.items())
+    # Canonical presentation order, mirroring dataset/utils.get_piece_arrangement.
+    for squares in pieces.values():
+        squares.sort()
+    piece_order = ["King", "Queen", "Rook", "Bishop", "Knight", "Pawn"]
+    ordered_keys = [f"{color} {piece_type}" for color in ("White", "Black") for piece_type in piece_order]
+    arrangement = ", ".join(f"{k}: {pieces[k]}" for k in ordered_keys if k in pieces)
     legal_moves = ", ".join(sorted(move.uci() for move in board.legal_moves))
 
     return f"Piece arrangement: {arrangement}\nLegal moves: {legal_moves}\n\n"
@@ -1124,12 +1135,9 @@ def main():
 def parse_arguments():
     """Parse CLI flags.
 
-    Caveats (upstream defaults kept as-is; several help strings are stale relative to the
-    actual defaults — trust the ``default=`` values):
+    Caveats (upstream defaults kept as-is):
     - Path defaults resolve two directories above this script (upstream's layout), which
       lands *outside* this repo — always pass --dataset-root benchmark --output-dir results.
-    - --workers defaults to 256 (help says 8); --max-retries to 10 (help says 5);
-      --timeout to 6000s (help says 60).
     - The commented-out --model lines are upstream's roster of evaluated models, kept as a
       convenient reference for reproduction runs.
     """
@@ -1171,11 +1179,11 @@ def parse_arguments():
     )
     parser.add_argument("--add-context", action="store_true")
     parser.add_argument(
-        "--workers", type=int, default=256, help="Number of parallel workers (default: 8, set to 1 for sequential)"
+        "--workers", type=int, default=256, help="Number of parallel workers (default: 256, set to 1 for sequential)"
     )
     parser.add_argument("--save-interval", type=int, default=10, help="Save results every N tasks (default: 10)")
-    parser.add_argument("--max-retries", type=int, default=10, help="Maximum retry attempts for API calls (default: 5)")
-    parser.add_argument("--timeout", type=int, default=6000, help="Request timeout in seconds (default: 60)")
+    parser.add_argument("--max-retries", type=int, default=10, help="Maximum retry attempts for API calls (default: 10)")
+    parser.add_argument("--timeout", type=int, default=6000, help="Request timeout in seconds (default: 6000)")
     parser.add_argument("--max-tokens", type=int, default=4096 * 2)
     parser.add_argument(
         "--use-format-example-group",

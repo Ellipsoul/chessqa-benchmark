@@ -42,12 +42,15 @@ useful after changing extraction/scoring logic.
 """
 
 import argparse
+import datetime
 import json
 import os
 import random
 import re
+import threading
 import time
-from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -55,10 +58,61 @@ import chess
 import requests
 from tqdm import tqdm
 
+import throttle
+
 BACKEND_URLS = {
     "vercel-gateway": "https://ai-gateway.vercel.sh/v1/chat/completions",
     "openrouter": "https://openrouter.ai/api/v1/chat/completions",
 }
+
+# One requests.Session per worker thread: connection pooling without sharing a Session
+# across threads (not documented thread-safe).
+_thread_local = threading.local()
+
+
+def _get_thread_session() -> requests.Session:
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        _thread_local.session = session
+    return session
+
+
+def build_reasoning_payload(model: str, backend: str) -> dict[str, Any]:
+    """Return the ``reasoning`` request field used when --enable-thinking is set.
+
+    ``{"effort": "medium"}`` is the paper's setting and is probe-verified (2026-07-06) to
+    produce full-text thinking traces through the gateway for Anthropic models on the
+    classic thinking interface (e.g. claude-haiku-4.5: reasoning_tokens > 0, typed
+    ``reasoning.text`` blocks).
+
+    KNOWN LIMITATION: Claude 5-family models (e.g. claude-sonnet-5) use Anthropic's newer
+    *adaptive thinking* interface (``thinking.type: adaptive`` + ``output_config.effort``),
+    which the gateway's OpenAI-compatible endpoint does not currently map — every probed
+    ``reasoning`` shape either no-ops (0 reasoning tokens) or 400s, and providerOptions
+    passthrough is dropped. Probing the gateway's Anthropic-native /v1/messages endpoint
+    shows adaptive thinking *works* there but returns thinking blocks with EMPTY text and
+    only a cryptographic signature — the trace is redacted at the API level. So for those
+    models, thinking traces are currently unobtainable via any transport; the runner warns
+    after any --enable-thinking run that produced zero traces (check ``thinking_source``).
+    """
+    return {"effort": "medium"}
+
+
+@dataclass
+class ModelCall:
+    """Everything one call_model invocation produced, including its retry history."""
+
+    content: str
+    thinking_content: str = ""
+    thinking_source: str = "none"
+    usage: dict[str, Any] = field(default_factory=dict)
+    raw_message: dict[str, Any] | None = None
+    provider_meta: dict[str, Any] | None = None
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+    latency_ms: int | None = None
+    ok: bool = False
+    error: str | None = None
 
 
 def load_env_file(env_path: Path | None = None) -> None:
@@ -459,56 +513,44 @@ def evaluate_answer_with_error_type(
             return False, "wrong_answer"
 
 
-def process_single_task(args_tuple):
+def run_one_task(
+    task: dict[str, Any],
+    inferencer: "OpenrouterInferencer",
+    format_example_group: int,
+    limiter: "throttle.RateLimiter | None",
+) -> dict[str, Any]:
     """Worker entry point: run one task end-to-end (format -> call -> extract -> score).
 
-    Takes a flat tuple because multiprocessing.Pool.imap pickles arguments; each worker
-    builds its own OpenrouterInferencer with the api_key passed in explicitly (avoiding a
-    re-read of the key file per task). Returns the original task dict + an ``inference``
-    block — the record that becomes one line of the results JSONL.
+    Runs inside a ThreadPoolExecutor worker — the shared inferencer is read-only here and
+    HTTP state is per-thread (see _get_thread_session). Returns the original task dict +
+    an ``inference`` block — the record that becomes one line of the results JSONL.
     """
-    (
-        task,
-        model,
-        add_context,
-        format_example_group,
-        api_key,
-        max_retries,
-        timeout,
-        max_tokens,
-        enable_thinking,
-        backend,
-    ) = args_tuple
-
-    # Create inferencer instance for this process
-    # Filename suffix is handled by the parent inferencer when saving; child only calls the API
-    inferencer = OpenrouterInferencer(
-        model, add_context, max_retries, timeout, max_tokens, enable_thinking, backend=backend
-    )
-    inferencer.api_key = api_key
-
-    prompt = format_prompt(task, add_context, format_example_group)
-    response, thinking_content, thinking_source, usage = inferencer.call_model(prompt)
-    extracted, extraction_successful = extract_answer(response)
+    prompt = format_prompt(task, inferencer.add_context, format_example_group)
+    call = inferencer.call_model(prompt, limiter=limiter, session=_get_thread_session())
+    extracted, extraction_successful = extract_answer(call.content)
 
     # Use answer_type-aware evaluation with error type classification
     answer_type = task.get("answer_type", "single")
     correct, error_type = evaluate_answer_with_error_type(
-        extracted, task["correct_answer"], answer_type, extraction_successful, usage, max_tokens
+        extracted, task["correct_answer"], answer_type, extraction_successful, call.usage, inferencer.max_tokens
     )
 
     # Include all original task fields plus inference information
     result = dict(task)  # Copy all original fields
     result["inference"] = {
         "prompt": prompt,
-        "response": response,
-        "thinking_content": thinking_content,
-        "thinking_source": thinking_source,
+        "response": call.content,
+        "thinking_content": call.thinking_content,
+        "thinking_source": call.thinking_source,
         "extracted": extracted,
         "extraction_successful": extraction_successful,
         "is_correct": correct,
         "error_type": error_type,
-        "usage": usage,
+        "usage": call.usage,
+        "raw_message": call.raw_message,
+        "provider_meta": call.provider_meta,
+        "attempts": call.attempts,
+        "latency_ms": call.latency_ms,
     }
     return result
 
@@ -563,21 +605,31 @@ class OpenrouterInferencer:
         self.api_key = resolve_api_key(backend)
         self.url = BACKEND_URLS[backend]
 
-    def call_model(self, prompt: str) -> tuple[str, str, str, dict[str, Any]]:
-        """POST one chat completion with exponential-backoff retries.
+    def call_model(
+        self,
+        prompt: str,
+        limiter: "throttle.RateLimiter | None" = None,
+        session: requests.Session | None = None,
+    ) -> ModelCall:
+        """POST one chat completion with rate limiting and classified, logged retries.
 
         Request notes:
-        - ``--enable-thinking`` maps to ``reasoning: {effort: "medium"}`` (the paper's
-          setting) — the same schema on both backends; thinking models get the full
-          ``max_tokens`` as their budget.
-        - OpenRouter-only fields: ``usage: {include: true}`` (per-call cost accounting —
-          the gateway reports spend in its dashboard instead and returns token counts by
-          default) and hardcoded provider-order pins for three models whose responses
-          upstream found unreliable on other providers.
+        - ``--enable-thinking`` maps to ``build_reasoning_payload`` (probe-verified; see
+          its docstring for the Claude 5 adaptive-thinking limitation).
+        - OpenRouter-only fields: ``usage: {include: true}`` (per-call cost accounting)
+          and hardcoded provider-order pins for three models whose responses upstream
+          found unreliable on other providers.
 
-        Returns ``(content, thinking_content, thinking_source, usage)``; the trace fields
-        come from ``extract_thinking``. After exhausting retries the content is the
-        literal string "ERROR: ...", which resume logic later treats as incomplete.
+        Retry policy (see eval/throttle.py): 429/502/503/connection failures retry up to
+        ``max_retries`` with Retry-After honored (a 429 penalizes the *shared* limiter so
+        all threads pause); read timeouts and 500/504/524 may have been billed upstream,
+        so they retry at most ``throttle.EXPENSIVE_MAX_ATTEMPTS`` times total; permanent
+        4xx and parse failures never retry. Every attempt is recorded in
+        ``ModelCall.attempts`` (mirrored into the results JSONL) so retry pressure and
+        billing discrepancies are diagnosable from our own data.
+
+        After exhausting retries, ``content`` is the literal string "ERROR: ...", which
+        resume logic later treats as incomplete.
         """
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
@@ -588,7 +640,7 @@ class OpenrouterInferencer:
         }
 
         if self.enable_thinking:
-            data["reasoning"] = {"effort": "medium"}
+            data["reasoning"] = build_reasoning_payload(self.model, self.backend)
 
         if self.backend == "openrouter":
             data["usage"] = {"include": True}
@@ -615,25 +667,100 @@ class OpenrouterInferencer:
                     ]
                 }
 
-        for attempt in range(self.max_retries):
+        transport = session if session is not None else requests
+        attempts: list[dict[str, Any]] = []
+
+        for attempt_number in range(1, self.max_retries + 1):
+            if limiter is not None:
+                limiter.acquire()
+
+            attempt = {
+                "attempt_no": attempt_number,
+                "started_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            attempt_start = time.monotonic()
+            response = None
+            failure: Exception | None = None
+
             try:
-                response = requests.post(
+                response = transport.post(
                     self.url, headers=headers, data=json.dumps(data), timeout=self.timeout, stream=False
                 )
-                response.raise_for_status()
-                result = response.json()
-                message = result["choices"][0]["message"]
-                content = message["content"].strip()
-                thinking_content, thinking_source = extract_thinking(message)
-                usage = result.get("usage", {})
-                return content, thinking_content, thinking_source, usage
+            except Exception as transport_error:
+                failure = transport_error
 
-            except Exception as error:
-                if attempt == self.max_retries - 1:
-                    return f"ERROR: {error}", "", "none", {}
-                # Exponential backoff with jitter
-                wait_time = (2**attempt) + random.uniform(0, 1)
-                time.sleep(wait_time)
+            duration_ms = int((time.monotonic() - attempt_start) * 1000)
+            attempt["duration_ms"] = duration_ms
+            attempt["http_status"] = response.status_code if response is not None else None
+
+            # Success path: 2xx that also parses cleanly.
+            if response is not None and 200 <= response.status_code < 300:
+                try:
+                    result = response.json()
+                    message = result["choices"][0]["message"]
+                    content = (message.get("content") or "").strip()
+                    thinking_content, thinking_source = extract_thinking(message)
+                    usage = result.get("usage", {}) or {}
+                    provider_meta = {
+                        key: result.get(key) for key in ("id", "model", "provider", "created") if result.get(key)
+                    }
+                    attempt.update(error_class="ok", billed_risk=1, retry_after_s=None, wait_s=None, outcome="success")
+                    attempts.append(attempt)
+                    return ModelCall(
+                        content=content,
+                        thinking_content=thinking_content,
+                        thinking_source=thinking_source,
+                        usage=usage,
+                        raw_message=message,
+                        provider_meta=provider_meta,
+                        attempts=attempts,
+                        latency_ms=duration_ms,
+                        ok=True,
+                    )
+                except Exception as parse_error:
+                    # 2xx body we couldn't parse: billed and received — do NOT regenerate.
+                    failure = parse_error
+
+            # Failure path: classify, decide, record, maybe sleep.
+            if response is not None and not (200 <= response.status_code < 300):
+                error_class, retriable, billed_risk = throttle.classify(response, None)
+                retry_after_s = throttle.parse_retry_after(response.headers)
+                error_detail = f"HTTP {response.status_code}: {response.text[:300]}"
+            else:
+                error_class, retriable, billed_risk = throttle.classify(None, failure)
+                retry_after_s = None
+                body_hint = f" body={response.text[:200]!r}" if (response is not None and error_class == "parse") else ""
+                error_detail = f"{type(failure).__name__}: {failure}{body_hint}"
+
+            attempt_budget = throttle.EXPENSIVE_MAX_ATTEMPTS if billed_risk else self.max_retries
+            will_retry = retriable and attempt_number < attempt_budget
+            wait_s = throttle.compute_backoff(attempt_number, retry_after_s) if will_retry else None
+            attempt.update(
+                error_class=error_class,
+                billed_risk=int(billed_risk),
+                retry_after_s=retry_after_s,
+                wait_s=wait_s,
+                outcome="retried" if will_retry else ("gave_up" if retriable else "fatal"),
+            )
+            attempts.append(attempt)
+
+            if not will_retry:
+                return ModelCall(content=f"ERROR: {error_detail}", attempts=attempts, error=error_detail)
+
+            billed_warning = " [BILLED-RISK: provider may have charged for the failed attempt]" if billed_risk else ""
+            tqdm.write(
+                f"[retry] attempt {attempt_number}/{attempt_budget} {error_class}"
+                f" (status={attempt['http_status']}) sleeping {wait_s:.1f}s{billed_warning}"
+            )
+            if error_class == "http_429" and limiter is not None:
+                # Pause every thread; the next acquire() drains through the bucket rather
+                # than stampeding when the window reopens.
+                limiter.penalize(wait_s)
+            else:
+                time.sleep(wait_s)
+
+        # Defensive: the loop always returns from inside.
+        return ModelCall(content="ERROR: retry loop exited unexpectedly", attempts=attempts, error="internal")
 
     def run_inference(
         self,
@@ -644,15 +771,19 @@ class OpenrouterInferencer:
         save_interval: int = 10,
         existing_results: list[dict[str, Any]] = None,
         save_existing_first: bool = False,
+        limiter: "throttle.RateLimiter | None" = None,
     ) -> list[dict[str, Any]]:
         """Run inference on tasks, saving incrementally; returns results in input task order.
 
-        ``num_workers == 1`` runs sequentially in-process; otherwise a multiprocessing.Pool
-        fans out via process_single_task. Every ``save_interval`` completions a batch is
-        appended to the results JSONL (parallel mode only appends once all results up to
-        that point have arrived, since imap yields in submission order). When resuming,
-        ``save_existing_first`` rewrites the file with the already-complete results so the
-        appends produce one coherent file.
+        One code path for any worker count: a ThreadPoolExecutor (requests are I/O-bound)
+        with results consumed via as_completed and appended to the results JSONL every
+        ``save_interval`` completions, in *completion* order — resume keys on task_id and
+        the final rewrite in main() restores task order, so mid-file ordering is
+        irrelevant and no completion is ever held back waiting for earlier submissions
+        (the old multiprocessing in-order barrier caused exactly that). The shared
+        ``limiter`` paces request starts across all threads. When resuming,
+        ``save_existing_first`` rewrites the file with the already-complete results so
+        the appends produce one coherent file.
         """
         if existing_results is None:
             existing_results = []
@@ -661,110 +792,26 @@ class OpenrouterInferencer:
         if save_existing_first and existing_results and output_path:
             self._save_existing_results(existing_results, output_path)
 
-        if num_workers == 1:
-            # Sequential processing with progress bar and incremental saving
-            results = []
-            for task_index, task in enumerate(tqdm(tasks, desc="Processing tasks")):
-                prompt = format_prompt(task, self.add_context, format_example_group)
-                response, thinking_content, thinking_source, usage = self.call_model(prompt)
-                extracted, extraction_successful = extract_answer(response)
+        print(f"Processing {len(tasks)} tasks with {num_workers} worker threads...")
+        results: list[dict[str, Any]] = []
+        pending_batch: list[dict[str, Any]] = []
 
-                # Use answer_type-aware evaluation with error type classification
-                answer_type = task.get("answer_type", "single")
-                correct, error_type = evaluate_answer_with_error_type(
-                    extracted, task["correct_answer"], answer_type, extraction_successful, usage, self.max_tokens
-                )
-
-                # Include all original task fields plus inference information
-                result = dict(task)  # Copy all original fields
-                result["inference"] = {
-                    "prompt": prompt,
-                    "response": response,
-                    "thinking_content": thinking_content,
-                    "thinking_source": thinking_source,
-                    "extracted": extracted,
-                    "extraction_successful": extraction_successful,
-                    "is_correct": correct,
-                    "error_type": error_type,
-                    "usage": usage,
-                }
+        with ThreadPoolExecutor(max_workers=max(1, num_workers)) as executor:
+            futures = [executor.submit(run_one_task, task, self, format_example_group, limiter) for task in tasks]
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing tasks"):
+                result = future.result()
                 results.append(result)
+                pending_batch.append(result)
+                if output_path and len(pending_batch) >= save_interval:
+                    self._save_incremental_results(pending_batch, output_path)
+                    pending_batch = []
 
-                # Save every save_interval responses
-                if output_path and (task_index + 1) % save_interval == 0:
-                    # Save only the last save_interval new results
-                    start_idx = max(0, len(results) - save_interval)
-                    new_batch = results[start_idx:]
-                    self._save_incremental_results(new_batch, output_path)
+        if output_path and pending_batch:
+            self._save_incremental_results(pending_batch, output_path)
 
-            # Save any remaining results that weren't saved in the last interval
-            if output_path and len(results) % save_interval != 0:
-                remaining_count = len(results) % save_interval
-                remaining_results = results[-remaining_count:]
-                self._save_incremental_results(remaining_results, output_path)
-
-            return results
-        else:
-            # Parallel processing with progress bar and incremental saving
-            print(f"Processing {len(tasks)} tasks with {num_workers} workers...")
-
-            # Prepare arguments for multiprocessing
-            args_list = [
-                (
-                    task,
-                    self.model,
-                    self.add_context,
-                    format_example_group,
-                    self.api_key,
-                    self.max_retries,
-                    self.timeout,
-                    self.max_tokens,
-                    self.enable_thinking,
-                    self.backend,
-                )
-                for task in tasks
-            ]
-
-            with Pool(num_workers) as pool:
-                # Use imap for progress tracking
-                results = []
-                for result_position, result in enumerate(
-                    tqdm(pool.imap(process_single_task, args_list), total=len(args_list), desc="Processing tasks")
-                ):
-                    results.append(result)
-
-                    # Save every save_interval responses
-                    if output_path and (result_position + 1) % save_interval == 0:
-                        # For parallel processing, we need to maintain order first
-                        temp_task_id_to_result = {result["task_id"]: result for result in results}
-                        temp_ordered_results = []
-                        for task_position in range(result_position + 1):
-                            if tasks[task_position]["task_id"] in temp_task_id_to_result:
-                                temp_ordered_results.append(temp_task_id_to_result[tasks[task_position]["task_id"]])
-                        if len(temp_ordered_results) == result_position + 1:  # All results up to this point are available
-                            # Save only the last save_interval new results
-                            start_idx = max(0, len(temp_ordered_results) - save_interval)
-                            new_batch = temp_ordered_results[start_idx:]
-                            self._save_incremental_results(new_batch, output_path)
-
-            # Save any remaining results that weren't saved in the last interval
-            if output_path and len(results) % save_interval != 0:
-                remaining_count = len(results) % save_interval
-                # For parallel processing, maintain order
-                temp_task_id_to_result = {result["task_id"]: result for result in results}
-                temp_ordered_results = []
-                for task in tasks:
-                    if task["task_id"] in temp_task_id_to_result:
-                        temp_ordered_results.append(temp_task_id_to_result[task["task_id"]])
-
-                remaining_results = temp_ordered_results[-remaining_count:]
-                self._save_incremental_results(remaining_results, output_path)
-
-            # Maintain original order
-            task_id_to_result = {result["task_id"]: result for result in results}
-            ordered_results = [task_id_to_result[task["task_id"]] for task in tasks]
-
-            return ordered_results
+        # Return in original task order
+        task_id_to_result = {result["task_id"]: result for result in results}
+        return [task_id_to_result[task["task_id"]] for task in tasks if task["task_id"] in task_id_to_result]
 
     def _save_incremental_results(self, new_results: list[dict[str, Any]], output_path: str):
         """Append a batch of new results to ``<output_dir>/<model_safe_name><suffixes>.jsonl``.
@@ -1050,6 +1097,7 @@ def main():
             # For resume mode, save existing results first, then append new ones
             # For no-resume mode, just append new results
             save_existing_first = not args.no_resume and len(complete_results) > 0
+            limiter = throttle.RateLimiter(requests_per_second=args.rps, burst=args.burst)
             new_results = inferencer.run_inference(
                 incomplete_tasks,
                 num_workers,
@@ -1058,8 +1106,25 @@ def main():
                 args.save_interval,
                 complete_results,
                 save_existing_first,
+                limiter=limiter,
             )
             end_time = time.time()
+
+            # A thinking run in which no task returned any trace almost certainly means the
+            # reasoning parameter silently no-opped for this model (e.g. Claude 5 adaptive
+            # thinking through the OpenAI-compatible endpoint) — flag it loudly rather than
+            # letting a mislabeled '-thinking' results file masquerade as a thinking run.
+            if args.enable_thinking and new_results:
+                traceless = sum(
+                    1 for result in new_results if result["inference"].get("thinking_source") in (None, "", "none")
+                )
+                if traceless == len(new_results):
+                    print(
+                        "\nWARNING: --enable-thinking was set but 0/"
+                        f"{len(new_results)} responses contained any thinking trace "
+                        "(thinking_source == 'none' everywhere). The reasoning parameter was "
+                        "likely ignored for this model; see build_reasoning_payload docstring."
+                    )
 
             # Combine complete and new results, maintaining original task order
             task_id_to_result = {}
@@ -1192,6 +1257,8 @@ def main():
                     "format_example_group": args.use_format_example_group,
                     "enable_thinking": args.enable_thinking,
                     "backend": args.backend,
+                    "rps": args.rps,
+                    "burst": args.burst,
                 },
             },
             stats_output,
@@ -1316,10 +1383,32 @@ def parse_arguments():
     )
     parser.add_argument("--add-context", action="store_true")
     parser.add_argument(
-        "--workers", type=int, default=256, help="Number of parallel workers (default: 256, set to 1 for sequential)"
+        "--workers",
+        type=int,
+        default=24,
+        help="Worker threads covering in-flight requests (default: 24). Throughput is governed "
+        "by --rps/--burst, not workers — raising this beyond the rate ceiling adds nothing.",
+    )
+    parser.add_argument(
+        "--rps",
+        type=float,
+        default=2.0,
+        help="Rate limit: request starts per second shared across all workers (default: 2.0)",
+    )
+    parser.add_argument(
+        "--burst",
+        type=int,
+        default=4,
+        help="Rate limit: token-bucket burst size (default: 4)",
     )
     parser.add_argument("--save-interval", type=int, default=10, help="Save results every N tasks (default: 10)")
-    parser.add_argument("--max-retries", type=int, default=10, help="Maximum retry attempts for API calls (default: 10)")
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=4,
+        help="Maximum attempts for cheap-retriable failures (default: 4); failures that may "
+        "already be billed (timeouts, 500/504/524) are capped at 2 attempts regardless",
+    )
     parser.add_argument("--timeout", type=int, default=6000, help="Request timeout in seconds (default: 6000)")
     parser.add_argument("--max-tokens", type=int, default=4096 * 2)
     parser.add_argument(

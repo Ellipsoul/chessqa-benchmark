@@ -8,8 +8,13 @@ SQL against `results/chessqa.sqlite3`). Update this file whenever the fleet chan
 treat it as the single source of truth for *which* models we run and *how each must be
 called*.
 
-Status: **proposed 2026-07-10, awaiting Aron's sign-off.** Nothing beyond one-task trials
-has been run.
+Status (2026-07-10): **smoke-first approved by Aron.** Next step is a 50-task smoke
+(`--N-samples-per-task 1`) of all fleet models (~$17 typical, ~$30 padded) to collapse
+the [x1..x6] cost bands to ±20%, after which the tier composition gets re-cut with
+measured numbers. Tier 1 full runs are deferred until then — $126 (x1) was judged too
+steep to self-fund on banded estimates alone. Existing 50-task smokes that must NOT be
+re-run: `anthropic_claude-haiku-4.5.jsonl` (non-thinking, $0.197) and
+`anthropic_claude-sonnet-5-verbose-cot.jsonl` (verbose no-thinking baseline).
 
 ## Cost model (how every estimate below was computed)
 

@@ -41,13 +41,25 @@ pip install -r requirements.txt          # or ./setup.sh
 
 # Run inference against the checked-in benchmark (default backend: Vercel AI Gateway)
 AI_GATEWAY_API_KEY=... python eval/run_openrouter.py --dataset-root benchmark \
-  --model anthropic/claude-sonnet-4.5 --output-dir results --workers 256
+  --model anthropic/claude-sonnet-4.5 --output-dir results
 
 # Useful flags: --backend {vercel-gateway,openrouter} (openrouter = the paper's transport,
-# results get an -openrouter suffix), --max-tasks N, --N-samples-per-task N (deterministic
+# results get an -openrouter suffix), --rps/--burst (shared rate limit; --workers 24 is
+# in-flight concurrency only), --max-tasks N, --N-samples-per-task N (deterministic
 # uniform sample per task_type), --add-context (inject piece arrangement + legal moves),
 # --enable-thinking, --use-format-example-group {1,2}, --no-resume,
-# --eval-only (re-extract/re-score an existing results JSONL without API calls)
+# --eval-only (re-extract/re-score an existing results JSONL without API calls),
+# --db-path / --no-db (SQLite results index)
+
+# Rebuild the SQLite results index from the canonical JSONLs
+python eval/storage.py ingest results/*.jsonl --dataset-root benchmark
+
+# Probe which reasoning payload shape enables thinking for a model (few cents)
+python eval/probe_reasoning.py --model anthropic/claude-haiku-4.5
+
+# Tests and lint
+python -m pytest tests/ -q
+ruff check dataset eval tests    # or: make lint
 
 # Regenerate datasets (needs Lichess dumps under data/raw/, see README)
 python dataset/01_structural.py --puzzle_path data/raw/lichess_db_puzzle.csv \
@@ -55,17 +67,17 @@ python dataset/01_structural.py --puzzle_path data/raw/lichess_db_puzzle.csv \
 # 02_motifs.py, 03_short_tactics.py, 04_position_judgement.py, 05_semantic.py follow the same pattern
 ```
 
-There is no test suite, linter, or package build — plain Python scripts.
-
 ## Architecture
 
-**Data flow:** raw Lichess dumps (`data/raw/`) → `dataset/0N_*.py` generators → benchmark JSONL (one file per category, checked in under `benchmark/`, 3,500 tasks total) → `eval/run_openrouter.py` → `results/<model>.jsonl` + `<model>_pretty.json` + `<model>_stats.json`.
+**Data flow:** raw Lichess dumps (`data/raw/`) → `dataset/0N_*.py` generators → benchmark JSONL (one file per category, checked in under `benchmark/`, 3,500 tasks total) → `eval/run_openrouter.py` → `results/<model>.jsonl` (canonical) + `<model>_stats.json` + `results/chessqa.sqlite3` (derived, rebuildable cross-run index; gitignored).
 
 **Task record schema** (defined as `ChessQuestionAnsweringTask` in `dataset/utils.py`): `task_id`, `task_type`, `task_category`, `input` (FEN, sometimes `"FEN | uci moves"` — strip after `|` before parsing), `question`, `format_examples` (two variants), `correct_answer`, `answer_type` (`"single"` = exact match, `"multi"` = comma-separated set comparison).
 
 **Prompt templating:** questions contain literal `CONTEXT_PLACEHOLDER` and `FORMAT_EXAMPLE_PLACEHOLDER` strings, resolved at inference time by `format_prompt()` in `eval/run_openrouter.py`. Keep placeholders intact in the JSONL — downstream users reconstruct prompt variants from them.
 
-**Eval runner** (`eval/run_openrouter.py`, single file; name kept from upstream): loads all `*.jsonl` from `--dataset-root`, fans out via `multiprocessing.Pool` to the selected backend's chat completions API — Vercel AI Gateway by default, OpenRouter via `--backend openrouter` (OpenRouter-only: per-call cost accounting and hardcoded provider-order pins in `call_model`; gateway runs report zero cost in stats, spend lives in the Vercel dashboard). Extracts the answer from the last `FINAL ANSWER:` line (with `\boxed{}` fallbacks) and scores with `evaluate_answer_with_error_type`. Error taxonomy: `correct`, `max_token_reached` (≥98% of max-tokens), `format_error`, `wrong_answer`, and `multi_extra_items`/`multi_missing_items`/`multi_false_items` for multi answers. Note this classifies *answers*, not *reasoning* — the Phase 3 gap. Thinking traces are saved per task as `thinking_content` plus a `thinking_source` fidelity tag (`full_text`/`summary`/`untyped`/`plain`/`encrypted_only`/`none`, from `extract_thinking`) — the gateway's typed `reasoning_details` blocks make full-trace vs. summary machine-legible, which is the Phase 3 gating signal.
+**Eval runner** (`eval/run_openrouter.py`; name kept from upstream): loads all `*.jsonl` from `--dataset-root`, fans out over a `ThreadPoolExecutor` paced by a shared token-bucket rate limiter (`eval/throttle.py` — Retry-After honored, 429s pause all threads, billed-risk failures capped at 2 attempts, permanent 4xx never retried, every attempt recorded per task). Backends: Vercel AI Gateway by default, OpenRouter via `--backend openrouter` (both return per-call cost in `usage`). Extracts the answer from the last `FINAL ANSWER:` line (with `\boxed{}` fallbacks) and scores with `evaluate_answer_with_error_type`. Error taxonomy: `correct`, `max_token_reached` (≥98% of max-tokens), `format_error`, `wrong_answer`, and `multi_extra_items`/`multi_missing_items`/`multi_false_items` for multi answers. Note this classifies *answers*, not *reasoning* — the Phase 3 gap. Thinking traces are saved per task as `thinking_content` plus a `thinking_source` fidelity tag (`full_text`/`summary`/`untyped`/`plain`/`encrypted_only`/`none`, from `extract_thinking`) — the fidelity signal that gates Phase 3. Probe-verified (2026-07): classic-thinking Anthropic models return `full_text` via `reasoning: {effort}`; **Claude 5 adaptive-thinking models (e.g. claude-sonnet-5) return zero/redacted thinking through every available transport** — the runner warns when a `--enable-thinking` run yields no traces, and `eval/probe_reasoning.py` tests payload shapes per model.
+
+**Results store** (`eval/storage.py`): SQLite (`results/chessqa.sqlite3`, WAL, stdlib) with `tasks`/`runs`/`results`/`attempts` tables; the JSONL is canonical and the DB is derived — rebuild with `python eval/storage.py ingest results/*.jsonl --dataset-root benchmark`. Rows mirror live during runs (record hook, idempotent upserts on `run_key`+`task_id`); run provenance includes git commit, dataset hash, exact reasoning payload, and CLI args; interrupted runs are marked `aborted`. Raw provider messages (typed `reasoning_details` + signatures) are retained per result for Phase 3 and the future public web explorer.
 
 **Resume behavior:** runs resume by default from the existing results JSONL, matching by `task_id`. The results filename encodes the variant — `<model with / and : replaced by _>` plus suffixes `-thinking`, `-piecearr` (from `--add-context`), `-fmt2` (from format example group 2), `-openrouter` (from `--backend openrouter`) — so flags must match the original run for resume and `--eval-only` to find the file.
 

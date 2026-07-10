@@ -9,7 +9,12 @@ import storage
 
 REPO_ROOT = Path(__file__).parent.parent
 HAIKU_JSONL = REPO_ROOT / "results" / "anthropic_claude-haiku-4.5.jsonl"
-SONNET_JSONL = REPO_ROOT / "results" / "anthropic_claude-sonnet-5-thinking.jsonl"
+# The Sonnet-5 smoke run was archived under a non-"-thinking" name: --enable-thinking was
+# set but the model returned zero traces (Claude 5 adaptive thinking is redacted / not
+# mappable via the gateway), so the file is a verbose visible-CoT baseline. The rename also
+# prevents a future *fixed* thinking run from silently resuming into it. The stats sidecar
+# still records enable_thinking=true (what was requested), which ingest treats as truth.
+SONNET_JSONL = REPO_ROOT / "results" / "anthropic_claude-sonnet-5-verbose-cot.jsonl"
 
 
 @pytest.fixture()
@@ -29,6 +34,9 @@ def test_schema_created(conn):
 def test_run_meta_from_filename():
     meta = storage.run_meta_from_filename("results/anthropic_claude-sonnet-5-thinking.jsonl")
     assert meta["enable_thinking"] is True and meta["model"] == "anthropic_claude-sonnet-5"
+    # Archived verbose baseline: no suffix tokens -> flags come from the stats sidecar at ingest
+    meta = storage.run_meta_from_filename("results/anthropic_claude-sonnet-5-verbose-cot.jsonl")
+    assert meta["enable_thinking"] is False and meta["model"] == "anthropic_claude-sonnet-5-verbose-cot"
     meta = storage.run_meta_from_filename("x/gpt-5-thinking-piecearr-fmt2-openrouter.jsonl")
     assert meta == {
         "backend": "openrouter", "enable_thinking": True, "add_context": True,
@@ -54,12 +62,12 @@ def test_ingest_smoke_fixtures(conn):
     ).fetchall()
     by_key = {record["run_key"]: record for record in row}
     assert by_key["anthropic_claude-haiku-4.5"]["accuracy"] == pytest.approx(0.14)
-    assert by_key["anthropic_claude-sonnet-5-thinking"]["accuracy"] == pytest.approx(0.68)
+    assert by_key["anthropic_claude-sonnet-5-verbose-cot"]["accuracy"] == pytest.approx(0.68)
     assert by_key["anthropic_claude-haiku-4.5"]["cost"] == pytest.approx(0.1972, abs=0.001)
 
     # Run metadata came from the stats sidecar
     sonnet_run = conn.execute(
-        "SELECT * FROM runs WHERE run_key = 'anthropic_claude-sonnet-5-thinking'"
+        "SELECT * FROM runs WHERE run_key = 'anthropic_claude-sonnet-5-verbose-cot'"
     ).fetchone()
     assert sonnet_run["enable_thinking"] == 1
     assert sonnet_run["backend"] == "vercel-gateway"

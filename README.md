@@ -160,16 +160,26 @@ AI_GATEWAY_API_KEY=... python eval/run_openrouter.py \
 Options
 - Backend: `--backend {vercel-gateway,openrouter}` (default `vercel-gateway`; use
   `openrouter` for paper-comparable runs — those results get an `-openrouter` suffix)
+- Rate limiting: `--rps 2.0 --burst 4` (request starts/second shared across all worker
+  threads; `--workers 24` only sets in-flight concurrency — throughput is governed by rps)
 - Limit total tasks: `--max-tasks 800`
-- Uniform sampling per task type: `--N-samples-per-task 50`
+- Uniform sampling per task type: `--N-samples-per-task 50` (deterministic)
 - Add auto‑generated context (piece arrangement + legal moves): `--add-context`
-- Enable “thinking” for models that support it: `--enable-thinking`
+- Enable “thinking” for models that support it: `--enable-thinking` (the runner warns if
+  the model returned zero traces — e.g. Claude 5 adaptive-thinking models, whose thinking
+  is currently redacted at the API level; check `thinking_source` per result)
 - Re‑evaluate an existing JSONL without calling APIs: `--eval-only`
+- Results database: `--db-path` (default `results/chessqa.sqlite3`), `--no-db` to skip
 
 Outputs
-- `results/<model>.jsonl`: per‑task records with prompts/responses and extraction
-- `results/<model>_pretty.json`: summarized JSON for quick reading
+- `results/<model>.jsonl`: per‑task records — prompts/responses, thinking trace +
+  `thinking_source` fidelity tag, raw provider message, per-attempt retry records, usage.
+  **This file is canonical.**
 - `results/<model>_stats.json`: accuracy, per‑category breakdowns, error shares, cost and tokens
+- `results/chessqa.sqlite3`: derived, queryable cross-run index (tasks / runs / results /
+  attempts; gitignored). Rebuild anytime:
+  `python eval/storage.py ingest results/*.jsonl --dataset-root benchmark`.
+  Instant browsable UI: `pipx run datasette results/chessqa.sqlite3`.
 
 ### Working with Placeholders (for Hugging Face / custom inference)
 

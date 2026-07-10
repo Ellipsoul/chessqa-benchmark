@@ -33,9 +33,10 @@ variant suffixes ``-thinking`` / ``-piecearr`` / ``-fmt2`` / ``-openrouter`` (fl
 match for resume and ``--eval-only`` to find the file; gateway runs get no backend suffix):
 - ``<name>.jsonl``  one result per line: the full task + an ``inference`` block (prompt,
   response, thinking_content, thinking_source, extracted answer, correctness, error_type,
-  usage).
-- ``<name>_pretty.json``  same content, indented for humans.
+  usage, raw_message, provider_meta, attempts, latency_ms). This file is CANONICAL.
 - ``<name>_stats.json``  aggregate accuracy/cost/error-type/per-category stats.
+- ``chessqa.sqlite3``  derived, rebuildable cross-run index (see eval/storage.py); skip
+  with ``--no-db``, rebuild anytime with ``python eval/storage.py ingest results/*.jsonl``.
 
 ``--eval-only`` re-runs steps 5+ on an existing results file without any API calls —
 useful after changing extraction/scoring logic.
@@ -58,6 +59,7 @@ import chess
 import requests
 from tqdm import tqdm
 
+import storage
 import throttle
 
 BACKEND_URLS = {
@@ -555,6 +557,14 @@ def run_one_task(
     return result
 
 
+def build_run_key(model: str, enable_thinking: bool, variant_suffix: str) -> str:
+    """The results-filename stem (and runs.run_key): model-safe name + variant suffixes."""
+    run_key = model.replace("/", "_").replace(":", "_")
+    if enable_thinking:
+        run_key += "-thinking"
+    return run_key + variant_suffix
+
+
 def _build_variant_suffix(add_context: bool, format_example_group: int, backend: str = "vercel-gateway") -> str:
     """Return a short suffix for filenames to distinguish experiment variants.
 
@@ -772,6 +782,7 @@ class OpenrouterInferencer:
         existing_results: list[dict[str, Any]] = None,
         save_existing_first: bool = False,
         limiter: "throttle.RateLimiter | None" = None,
+        record_hook=None,
     ) -> list[dict[str, Any]]:
         """Run inference on tasks, saving incrementally; returns results in input task order.
 
@@ -802,6 +813,8 @@ class OpenrouterInferencer:
                 result = future.result()
                 results.append(result)
                 pending_batch.append(result)
+                if record_hook is not None:
+                    record_hook(result)
                 if output_path and len(pending_batch) >= save_interval:
                     self._save_incremental_results(pending_batch, output_path)
                     pending_batch = []
@@ -821,14 +834,8 @@ class OpenrouterInferencer:
         full result set is rewritten at the end of main() anyway.
         """
         try:
-            # Get model name from output path and create model-based filename
             output_dir = Path(output_path)
-            # Extract model name from the inferencer (need to get it from self.model)
-            model_safe_name = self.model.replace("/", "_").replace(":", "_")
-            if self.enable_thinking:
-                model_safe_name += "-thinking"
-            # Add variant suffix if provided (e.g., -piecearr, -fmt2)
-            model_safe_name += self.filename_suffix
+            model_safe_name = build_run_key(self.model, self.enable_thinking, self.filename_suffix)
             results_file = output_dir / f"{model_safe_name}.jsonl"
 
             # Append new results to JSONL file
@@ -851,14 +858,8 @@ class OpenrouterInferencer:
         """Overwrite the results file with previously completed results (resume bootstrap),
         so subsequent incremental appends continue a coherent file."""
         try:
-            # Get model name from output path and create model-based filename
             output_dir = Path(output_path)
-            # Extract model name from the inferencer (need to get it from self.model)
-            model_safe_name = self.model.replace("/", "_").replace(":", "_")
-            if self.enable_thinking:
-                model_safe_name += "-thinking"
-            # Add variant suffix if provided (e.g., -piecearr, -fmt2)
-            model_safe_name += self.filename_suffix
+            model_safe_name = build_run_key(self.model, self.enable_thinking, self.filename_suffix)
             results_file = output_dir / f"{model_safe_name}.jsonl"
 
             # Write existing results to file (overwrite)
@@ -988,15 +989,21 @@ def main():
     # Set num_workers for metadata (used in eval-only mode too)
     num_workers = args.workers
 
+    # SQLite handle; stays None in eval-only mode (DB sync for rescoring lands separately)
+    # and under --no-db.
+    conn = None
+    run_id = None
+
     # Check for eval-only mode first
     if args.eval_only:
         print("Running in EVAL-ONLY mode - re-evaluating existing results")
 
         # Get the results file path (include variant suffix to match the run)
-        model_safe_name = args.model.replace("/", "_").replace(":", "_")
-        if args.enable_thinking:
-            model_safe_name += "-thinking"
-        model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
+        model_safe_name = build_run_key(
+            args.model,
+            args.enable_thinking,
+            _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend),
+        )
         results_file = args.output_dir / f"{model_safe_name}.jsonl"
 
         # Check if results file exists
@@ -1067,10 +1074,11 @@ def main():
         else:
             print("Checking for existing results to resume from...")
             # Check for existing results and filter incomplete tasks
-            model_safe_name = args.model.replace("/", "_").replace(":", "_")
-            if args.enable_thinking:
-                model_safe_name += "-thinking"
-            model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
+            model_safe_name = build_run_key(
+                args.model,
+                args.enable_thinking,
+                _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend),
+            )
             results_file = args.output_dir / f"{model_safe_name}.jsonl"
             existing_results = load_existing_results(results_file)
 
@@ -1079,9 +1087,35 @@ def main():
             print(f"Tasks already completed: {len(complete_results)}")
             print(f"Tasks needing inference: {len(incomplete_tasks)}")
 
+        # SQLite results index (the JSONL stays canonical; the DB is derived + rebuildable).
+        variant_suffix = _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
+        if not args.no_db:
+            db_path = args.db_path or (args.output_dir / storage.DEFAULT_DB_NAME)
+            conn = storage.connect(db_path)
+            dataset_hash = storage.compute_dataset_hash(args.dataset_root)
+            storage.upsert_tasks(conn, tasks, dataset_hash=dataset_hash)
+            run_key = build_run_key(args.model, args.enable_thinking, variant_suffix)
+            run_id = storage.get_or_create_run(
+                conn,
+                run_key,
+                {
+                    "model": args.model,
+                    "backend": args.backend,
+                    "enable_thinking": args.enable_thinking,
+                    "add_context": args.add_context,
+                    "format_example_group": args.use_format_example_group,
+                    "max_tokens": args.max_tokens,
+                    "reasoning_config": (
+                        build_reasoning_payload(args.model, args.backend) if args.enable_thinking else None
+                    ),
+                    "dataset_hash": dataset_hash,
+                    "git_commit": storage.git_commit_or_none(Path(__file__).parent.parent),
+                    "cli_args": vars(args),
+                },
+            )
+            print(f"Results database: {db_path} (run_key={run_key}, run_id={run_id})")
+
         if incomplete_tasks:
-            # Build a filename suffix based on variant flags so this run doesn't overwrite others
-            variant_suffix = _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
             inferencer = OpenrouterInferencer(
                 args.model,
                 args.add_context,
@@ -1098,6 +1132,21 @@ def main():
             # For no-resume mode, just append new results
             save_existing_first = not args.no_resume and len(complete_results) > 0
             limiter = throttle.RateLimiter(requests_per_second=args.rps, burst=args.burst)
+
+            record_hook = None
+            if conn is not None:
+                recorded_count = 0
+
+                def record_to_db(result: dict[str, Any]) -> None:
+                    """Mirror each completed row into SQLite as it lands (batched commits)."""
+                    nonlocal recorded_count
+                    storage.upsert_result(conn, run_id, result)
+                    recorded_count += 1
+                    if recorded_count % args.save_interval == 0:
+                        conn.commit()
+
+                record_hook = record_to_db
+
             new_results = inferencer.run_inference(
                 incomplete_tasks,
                 num_workers,
@@ -1107,7 +1156,10 @@ def main():
                 complete_results,
                 save_existing_first,
                 limiter=limiter,
+                record_hook=record_hook,
             )
+            if conn is not None:
+                conn.commit()
             end_time = time.time()
 
             # A thinking run in which no task returned any trace almost certainly means the
@@ -1213,10 +1265,11 @@ def main():
         stats["avg_tokens"] = stats["tokens"] / stats["total"] if stats["total"] > 0 else 0.0
 
     # Create model-based filenames with variant suffix
-    model_safe_name = args.model.replace("/", "_").replace(":", "_")
-    if args.enable_thinking:
-        model_safe_name += "-thinking"
-    model_safe_name += _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
+    model_safe_name = build_run_key(
+        args.model,
+        args.enable_thinking,
+        _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend),
+    )
     results_file = args.output_dir / f"{model_safe_name}.jsonl"
     stats_file = args.output_dir / f"{model_safe_name}_stats.json"
 
@@ -1226,44 +1279,43 @@ def main():
         for result in results:
             results_output.write(json.dumps(result, ensure_ascii=False) + "\n")
 
-    # Also save a pretty-printed JSON version for readability
-    pretty_file = args.output_dir / f"{model_safe_name}_pretty.json"
-    with open(pretty_file, "w") as pretty_output:
-        json.dump(results, pretty_output, indent=2, ensure_ascii=False)
-    print(f"PRETTY JSON SAVED: {pretty_file}")
-
-    # Save stats as separate JSON file
+    # Save stats as separate JSON file (the same object lands in runs.stats below)
+    stats_payload = {
+        "model": args.model,
+        "accuracy": accuracy,
+        "format_correct_rate": usage_stats["extraction_success_rate"],
+        "total": total,
+        "correct": correct,
+        "format_correct": usage_stats["extraction_success_count"],
+        "error_type_stats": error_type_stats,
+        "error_type_rates": error_type_rates,
+        "time": end_time - start_time,
+        "usage": usage_stats,
+        "task_type_stats": task_type_stats,
+        "task_category_stats": task_category_stats,
+        "metadata": {
+            "dataset_root": str(args.dataset_root),
+            "n_samples_per_task": args.N_samples_per_task,
+            "max_tasks": args.max_tasks,
+            "add_context": args.add_context,
+            "workers": num_workers,
+            "format_example_group": args.use_format_example_group,
+            "enable_thinking": args.enable_thinking,
+            "backend": args.backend,
+            "rps": args.rps,
+            "burst": args.burst,
+        },
+    }
     with open(stats_file, "w") as stats_output:
-        json.dump(
-            {
-                "model": args.model,
-                "accuracy": accuracy,
-                "format_correct_rate": usage_stats["extraction_success_rate"],
-                "total": total,
-                "correct": correct,
-                "format_correct": usage_stats["extraction_success_count"],
-                "error_type_stats": error_type_stats,
-                "error_type_rates": error_type_rates,
-                "time": end_time - start_time,
-                "usage": usage_stats,
-                "task_type_stats": task_type_stats,
-                "task_category_stats": task_category_stats,
-                "metadata": {
-                    "dataset_root": str(args.dataset_root),
-                    "n_samples_per_task": args.N_samples_per_task,
-                    "max_tasks": args.max_tasks,
-                    "add_context": args.add_context,
-                    "workers": num_workers,
-                    "format_example_group": args.use_format_example_group,
-                    "enable_thinking": args.enable_thinking,
-                    "backend": args.backend,
-                    "rps": args.rps,
-                    "burst": args.burst,
-                },
-            },
-            stats_output,
-            indent=2,
-        )
+        json.dump(stats_payload, stats_output, indent=2)
+
+    # Final DB sync: upsert every row (idempotent — catches rows completed in previous
+    # resumed invocations that this invocation didn't re-run), then finalize the run.
+    if conn is not None:
+        for result in results:
+            storage.upsert_result(conn, run_id, result)
+        storage.finalize_run(conn, run_id, stats_payload, status="complete")
+        conn.close()
 
     # Print per-task-category stats with cost and extraction success information
     print("\nPER-TASK-CATEGORY PERFORMANCE:")
@@ -1323,7 +1375,6 @@ def main():
     if usage_stats["error_count"] > 0:
         print(f"API Errors: {usage_stats['error_count']}")
     print(f"\nRESULTS SAVED: {results_file}")
-    print(f"PRETTY JSON SAVED: {pretty_file}")
     print(f"STATS SAVED: {stats_file}")
 
 
@@ -1422,6 +1473,17 @@ def parse_arguments():
         "--no-resume",
         action="store_true",
         help="Start inference from scratch, ignore existing results (default: resume from existing)",
+    )
+    parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=None,
+        help=f"SQLite results database path (default: <output-dir>/{storage.DEFAULT_DB_NAME})",
+    )
+    parser.add_argument(
+        "--no-db",
+        action="store_true",
+        help="Skip the SQLite results index entirely (JSONL outputs are unaffected)",
     )
     parser.add_argument(
         "--enable-thinking", action="store_true", help="Enable reasoning/thinking mode for models that support it"

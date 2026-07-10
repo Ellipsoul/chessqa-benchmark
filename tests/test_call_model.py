@@ -157,15 +157,30 @@ def make_task(index):
 
 
 def test_runner_end_to_end_threads(inferencer, monkeypatch, tmp_path):
+    import storage
+
     tasks = [make_task(index) for index in range(30)]
     session = ScriptedSession([FakeResponse(200, success_body())] * 30)
     lock_free_session = session  # ScriptedSession.pop(0) is GIL-atomic enough for identical outcomes
     monkeypatch.setattr(run_openrouter, "_get_thread_session", lambda: lock_free_session)
 
+    # Live DB mirroring via the record hook (main() wires this identically)
+    conn = storage.connect(tmp_path / "test.sqlite3")
+    run_id = storage.get_or_create_run(conn, "e2e-run", {"model": "anthropic/claude-haiku-4.5"})
+
     limiter = throttle.RateLimiter(requests_per_second=10_000, burst=10_000)
     results = inferencer.run_inference(
-        tasks, num_workers=8, output_path=str(tmp_path), save_interval=10, limiter=limiter
+        tasks,
+        num_workers=8,
+        output_path=str(tmp_path),
+        save_interval=10,
+        limiter=limiter,
+        record_hook=lambda result: storage.upsert_result(conn, run_id, result),
     )
+    conn.commit()
+    db_rows = conn.execute("SELECT COUNT(*) AS n, SUM(is_correct) AS correct FROM results").fetchone()
+    assert db_rows["n"] == 30 and db_rows["correct"] == 30
+    conn.close()
 
     assert len(results) == 30
     assert [result["task_id"] for result in results] == [task["task_id"] for task in tasks], "task order restored"

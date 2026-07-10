@@ -4,9 +4,9 @@ Descended from the single-file harness used for all of the paper's 23 runs (whic
 only to OpenRouter). This version supports two selectable backends via ``--backend``:
 
 - ``vercel-gateway`` (default): Vercel AI Gateway's OpenAI-compatible endpoint. Auth via
-  the ``AI_GATEWAY_API_KEY`` env var (fallback: ``VERCEL_OIDC_TOKEN``). Note the gateway
-  does not return per-call dollar cost, so cost columns in stats are zero for these runs —
-  spend lives in the Vercel dashboard.
+  the ``AI_GATEWAY_API_KEY`` env var (fallback: ``VERCEL_OIDC_TOKEN``). Verified live:
+  the gateway returns per-call dollar cost in ``usage`` (cost/gateway_cost/market_cost),
+  so cost columns populate on both backends; the dashboard adds request-level logs.
 - ``openrouter``: the paper's original transport, kept for apples-to-apples comparison
   runs. Auth via ``OPENROUTER_API_KEY`` env var, falling back to the legacy
   ``../keys/api_keys.json`` beside the checkout (``{"openrouter_api_key": "..."}``).
@@ -19,10 +19,12 @@ End-to-end flow:
 3. For each task, ``format_prompt`` resolves the placeholders baked into the question
    (CONTEXT_PLACEHOLDER, FORMAT_EXAMPLE_PLACEHOLDER) according to ``--add-context`` and
    ``--use-format-example-group``.
-4. Fan out over a ``multiprocessing.Pool`` (``--workers``); each worker POSTs to the
-   selected backend's chat completions API with retries, and pulls thinking traces out of
-   the response's ``reasoning``/``reasoning_details`` fields when present, recording a
-   ``thinking_source`` fidelity tag (full_text / summary / encrypted_only / ...) per task.
+4. Fan out over a ``ThreadPoolExecutor`` (``--workers``) paced by a shared rate limiter
+   (``--rps``/``--burst``; see eval/throttle.py for the retry/backoff policy); each worker
+   POSTs to the selected backend's chat completions API, records every attempt, and pulls
+   thinking traces out of the response's ``reasoning``/``reasoning_details`` fields,
+   recording a ``thinking_source`` fidelity tag (full_text / summary / encrypted_only / ...)
+   per task.
 5. ``extract_answer`` takes the last ``FINAL ANSWER:`` line (with ``\\boxed{}`` fallback);
    ``evaluate_answer_with_error_type`` scores it (exact match for "single", set match for
    "multi") and classifies failures. Note this classifies *answers only* — nothing inspects
@@ -975,6 +977,44 @@ def filter_incomplete_tasks(
     return incomplete_tasks, complete_results
 
 
+def setup_results_db(args, tasks: list[dict[str, Any]]):
+    """Open the SQLite index and register this run; returns (conn, run_id) or (None, None).
+
+    Shared by normal and --eval-only modes. Honors --no-db. Provenance captured per
+    run_key: model/backend/variant flags, the exact reasoning payload that will be sent,
+    dataset hash, best-effort git commit, and the full CLI namespace.
+    """
+    if args.no_db:
+        return None, None
+    db_path = args.db_path or (args.output_dir / storage.DEFAULT_DB_NAME)
+    conn = storage.connect(db_path)
+    dataset_hash = storage.compute_dataset_hash(args.dataset_root)
+    storage.upsert_tasks(conn, tasks, dataset_hash=dataset_hash)
+    run_key = build_run_key(
+        args.model,
+        args.enable_thinking,
+        _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend),
+    )
+    run_id = storage.get_or_create_run(
+        conn,
+        run_key,
+        {
+            "model": args.model,
+            "backend": args.backend,
+            "enable_thinking": args.enable_thinking,
+            "add_context": args.add_context,
+            "format_example_group": args.use_format_example_group,
+            "max_tokens": args.max_tokens,
+            "reasoning_config": (build_reasoning_payload(args.model, args.backend) if args.enable_thinking else None),
+            "dataset_hash": dataset_hash,
+            "git_commit": storage.git_commit_or_none(Path(__file__).parent.parent),
+            "cli_args": vars(args),
+        },
+    )
+    print(f"Results database: {db_path} (run_key={run_key}, run_id={run_id})")
+    return conn, run_id
+
+
 def main():
     """CLI entry: run (or resume, or re-evaluate) a full benchmark pass and report stats.
 
@@ -1050,6 +1090,10 @@ def main():
             for result in results:
                 results_output.write(json.dumps(result, ensure_ascii=False) + "\n")
 
+        # Rescoring changes is_correct/error_type — keep the DB in step with the JSONL
+        # (the common final-sync block upserts every row and re-finalizes with new stats).
+        conn, run_id = setup_results_db(args, tasks)
+
         # Use dummy timing for eval-only mode
         start_time = time.time()
         end_time = time.time()
@@ -1089,31 +1133,7 @@ def main():
 
         # SQLite results index (the JSONL stays canonical; the DB is derived + rebuildable).
         variant_suffix = _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
-        if not args.no_db:
-            db_path = args.db_path or (args.output_dir / storage.DEFAULT_DB_NAME)
-            conn = storage.connect(db_path)
-            dataset_hash = storage.compute_dataset_hash(args.dataset_root)
-            storage.upsert_tasks(conn, tasks, dataset_hash=dataset_hash)
-            run_key = build_run_key(args.model, args.enable_thinking, variant_suffix)
-            run_id = storage.get_or_create_run(
-                conn,
-                run_key,
-                {
-                    "model": args.model,
-                    "backend": args.backend,
-                    "enable_thinking": args.enable_thinking,
-                    "add_context": args.add_context,
-                    "format_example_group": args.use_format_example_group,
-                    "max_tokens": args.max_tokens,
-                    "reasoning_config": (
-                        build_reasoning_payload(args.model, args.backend) if args.enable_thinking else None
-                    ),
-                    "dataset_hash": dataset_hash,
-                    "git_commit": storage.git_commit_or_none(Path(__file__).parent.parent),
-                    "cli_args": vars(args),
-                },
-            )
-            print(f"Results database: {db_path} (run_key={run_key}, run_id={run_id})")
+        conn, run_id = setup_results_db(args, tasks)
 
         if incomplete_tasks:
             inferencer = OpenrouterInferencer(
@@ -1147,17 +1167,28 @@ def main():
 
                 record_hook = record_to_db
 
-            new_results = inferencer.run_inference(
-                incomplete_tasks,
-                num_workers,
-                args.use_format_example_group,
-                str(args.output_dir),
-                args.save_interval,
-                complete_results,
-                save_existing_first,
-                limiter=limiter,
-                record_hook=record_hook,
-            )
+            try:
+                new_results = inferencer.run_inference(
+                    incomplete_tasks,
+                    num_workers,
+                    args.use_format_example_group,
+                    str(args.output_dir),
+                    args.save_interval,
+                    complete_results,
+                    save_existing_first,
+                    limiter=limiter,
+                    record_hook=record_hook,
+                )
+            except KeyboardInterrupt:
+                # Partial rows are already on disk (JSONL appends + DB mirroring); mark the
+                # run aborted so the DB is honest about incompleteness, then let the
+                # interrupt propagate. Resuming with the same flags picks up cleanly.
+                if conn is not None:
+                    conn.commit()
+                    storage.finalize_run(conn, run_id, None, status="aborted")
+                    conn.close()
+                print("\nInterrupted — completed rows are saved; DB run marked 'aborted'. Resume with the same flags.")
+                raise
             if conn is not None:
                 conn.commit()
             end_time = time.time()

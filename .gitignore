@@ -210,3 +210,6 @@ __marimo__/
 results/*.sqlite3
 results/*.sqlite3-wal
 results/*.sqlite3-shm
+
+# macOS
+.DS_Store

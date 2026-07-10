@@ -1,0 +1,69 @@
+{
+  "model": "deepseek/deepseek-v4-pro",
+  "accuracy": 0.0,
+  "format_correct_rate": 1.0,
+  "total": 1,
+  "correct": 0,
+  "format_correct": 1,
+  "error_type_stats": {
+    "multi_extra_items": 1
+  },
+  "error_type_rates": {
+    "multi_extra_items": 1.0
+  },
+  "time": 48.2472767829895,
+  "usage": {
+    "total_cost": 0.002612175,
+    "total_prompt_tokens": 197,
+    "total_completion_tokens": 2904,
+    "total_tokens": 3101,
+    "error_count": 0,
+    "extraction_success_count": 1,
+    "extraction_success_rate": 1.0,
+    "avg_cost_per_task": 0.002612175,
+    "avg_tokens_per_task": 3101.0,
+    "cost_per_1k_tokens": 0.0008423653660109642,
+    "tokens_per_dollar": 1187133.3275909922,
+    "avg_prompt_tokens": 197.0,
+    "avg_completion_tokens": 2904.0,
+    "completion_ratio": 14.741116751269036
+  },
+  "task_type_stats": {
+    "motifs_battery": {
+      "total": 1,
+      "correct": 0,
+      "cost": 0.002612175,
+      "tokens": 3101,
+      "extraction_success": 1,
+      "accuracy": 0.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.002612175,
+      "avg_tokens": 3101.0
+    }
+  },
+  "task_category_stats": {
+    "Motifs": {
+      "total": 1,
+      "correct": 0,
+      "cost": 0.002612175,
+      "tokens": 3101,
+      "extraction_success": 1,
+      "accuracy": 0.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.002612175,
+      "avg_tokens": 3101.0
+    }
+  },
+  "metadata": {
+    "dataset_root": "benchmark",
+    "n_samples_per_task": 1,
+    "max_tasks": 1,
+    "add_context": false,
+    "workers": 1,
+    "format_example_group": 1,
+    "enable_thinking": true,
+    "backend": "vercel-gateway",
+    "rps": 2.0,
+    "burst": 4
+  }
+}

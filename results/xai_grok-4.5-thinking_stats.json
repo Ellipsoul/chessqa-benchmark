@@ -1,0 +1,69 @@
+{
+  "model": "xai/grok-4.5",
+  "accuracy": 0.0,
+  "format_correct_rate": 0.0,
+  "total": 1,
+  "correct": 0,
+  "format_correct": 0,
+  "error_type_stats": {
+    "format_error": 1
+  },
+  "error_type_rates": {
+    "format_error": 1.0
+  },
+  "time": 4.583410978317261,
+  "usage": {
+    "total_cost": 0.0,
+    "total_prompt_tokens": 0,
+    "total_completion_tokens": 0,
+    "total_tokens": 0,
+    "error_count": 1,
+    "extraction_success_count": 0,
+    "extraction_success_rate": 0.0,
+    "avg_cost_per_task": 0.0,
+    "avg_tokens_per_task": 0.0,
+    "cost_per_1k_tokens": 0.0,
+    "tokens_per_dollar": 0.0,
+    "avg_prompt_tokens": 0.0,
+    "avg_completion_tokens": 0.0,
+    "completion_ratio": 0.0
+  },
+  "task_type_stats": {
+    "motifs_battery": {
+      "total": 1,
+      "correct": 0,
+      "cost": 0.0,
+      "tokens": 0,
+      "extraction_success": 0,
+      "accuracy": 0.0,
+      "extraction_success_rate": 0.0,
+      "avg_cost": 0.0,
+      "avg_tokens": 0.0
+    }
+  },
+  "task_category_stats": {
+    "Motifs": {
+      "total": 1,
+      "correct": 0,
+      "cost": 0.0,
+      "tokens": 0,
+      "extraction_success": 0,
+      "accuracy": 0.0,
+      "extraction_success_rate": 0.0,
+      "avg_cost": 0.0,
+      "avg_tokens": 0.0
+    }
+  },
+  "metadata": {
+    "dataset_root": "benchmark",
+    "n_samples_per_task": 1,
+    "max_tasks": 1,
+    "add_context": false,
+    "workers": 1,
+    "format_example_group": 1,
+    "enable_thinking": true,
+    "backend": "vercel-gateway",
+    "rps": 2.0,
+    "burst": 4
+  }
+}

@@ -86,17 +86,26 @@ ANTHROPIC_NATIVE_URL = "https://ai-gateway.vercel.sh/v1/messages"
 
 
 def anthropic_adaptive_thinking(model: str) -> bool:
-    """True for Anthropic models on the Claude 5+ *adaptive thinking* interface.
+    """True for Anthropic models on the *adaptive thinking* interface.
 
-    Detected by the trailing major version in the slug (``anthropic/claude-sonnet-5`` -> 5,
-    ``anthropic/claude-haiku-4.5`` -> 4). Claude 5+ models reject the classic
-    ``thinking.type: enabled`` budget interface and require ``thinking.type: adaptive``.
+    Detected by the trailing version in the slug (``anthropic/claude-sonnet-5`` -> 5.0,
+    ``anthropic/claude-haiku-4.5`` -> 4.5). Adaptive models reject the classic
+    ``thinking.type: enabled`` budget interface (and every chat-completions ``reasoning``
+    shape silently no-ops), so they must be routed to the Anthropic-native endpoint with
+    ``thinking.type: adaptive``.
+
+    The boundary is version >= 4.7, not >= 5: probe-verified 2026-07-10 against the
+    gateway's /v1/messages endpoint — claude-opus-4.7 and claude-opus-4.8 reject
+    ``thinking.type.enabled`` ("Use thinking.type.adaptive"), while claude-opus-4.6,
+    claude-sonnet-4.6, and claude-haiku-4.5 accept it and return full raw thinking blocks.
+    Adaptive models also cap ``thinking.display`` at ``summarized`` (``full`` rejected),
+    so 4.6-and-earlier models are the only Anthropic source of full_text traces.
     """
     if not model.startswith("anthropic/claude"):
         return False
     version_token = model.rsplit("-", 1)[-1]
     try:
-        return int(float(version_token)) >= 5
+        return float(version_token) >= 4.7
     except ValueError:
         return False
 
@@ -109,7 +118,7 @@ def build_reasoning_payload(model: str, backend: str) -> dict[str, Any]:
     - Classic-thinking models (e.g. claude-haiku-4.5, and non-Anthropic reasoning models):
       OpenRouter-style ``reasoning: {"effort": "medium"}`` on the chat-completions endpoint —
       the paper's setting; yields FULL-TEXT traces (``thinking_source: full_text``).
-    - Claude 5-family adaptive-thinking models (``anthropic_adaptive_thinking``): full raw
+    - Adaptive-thinking models — Claude 5 family and Opus 4.7+ (``anthropic_adaptive_thinking``): full raw
       CoT is withheld by Anthropic (``thinking.display`` accepts only
       ``"omitted" | "summarized"``), and the OpenAI-compatible endpoint cannot express
       adaptive thinking at all (every ``reasoning`` shape no-ops; ``display`` is not passed
@@ -718,7 +727,7 @@ class OpenrouterInferencer:
             "max_tokens": self.max_tokens,
         }
 
-        # Claude 5-family thinking runs must go through the gateway's Anthropic-native
+        # Adaptive-thinking (Claude 5 family, Opus 4.7+) runs must go through the gateway's Anthropic-native
         # endpoint: adaptive thinking (and its display=summarized traces) cannot be
         # expressed on the OpenAI-compatible endpoint. See build_reasoning_payload.
         use_native_anthropic = (

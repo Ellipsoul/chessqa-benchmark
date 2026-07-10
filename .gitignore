@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ChessQA results database (derived, rebuildable via eval/storage.py ingest)
+results/*.sqlite3
+results/*.sqlite3-wal
+results/*.sqlite3-shm

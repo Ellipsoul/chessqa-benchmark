@@ -211,6 +211,15 @@ prompt = format_prompt(
 
 When publishing on Hugging Face, retain the JSONL files as-is and reference this workflow so users can opt into context injection or alternate formatting as needed.
 
+## Model Fleet (2026 evaluation)
+
+The canonical list of models this fork evaluates — a budget tier for immediate full runs
+and a funded tier deferred until funding — lives in **[docs/model-fleet.md](docs/model-fleet.md)**,
+together with per-model calling quirks (Anthropic ≥4.7 adaptive routing, OpenAI
+summary-only reasoning, provider response shapes) and the full-run cost model with its
+calculations. Fidelity probes and one-task trial evidence behind those numbers:
+[docs/model-trials/2026-07-10-fidelity-and-cost.md](docs/model-trials/2026-07-10-fidelity-and-cost.md).
+
 ## License
 
 MIT License. See `LICENSE` for details.

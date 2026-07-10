@@ -28,9 +28,12 @@ class ScriptedSession:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
         self.requests_made = []
+        self.calls = []
 
     def post(self, url, headers=None, data=None, timeout=None, stream=False):
-        self.requests_made.append(json.loads(data))
+        payload = json.loads(data)
+        self.requests_made.append(payload)
+        self.calls.append({"url": url, "headers": headers or {}, "payload": payload})
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -134,9 +137,84 @@ def test_gateway_payload_shape(inferencer):
     session = ScriptedSession([FakeResponse(200, success_body())])
     inferencer.enable_thinking = True
     inferencer.call_model("prompt", session=session)
-    payload = session.requests_made[0]
-    assert payload["reasoning"] == {"effort": "medium"}
-    assert "usage" not in payload and "provider" not in payload
+    call = session.calls[0]
+    assert call["url"] == "https://ai-gateway.vercel.sh/v1/chat/completions"
+    assert call["payload"]["reasoning"] == {"effort": "medium"}
+    assert "usage" not in call["payload"] and "provider" not in call["payload"]
+    assert "thinking" not in call["payload"], "classic-thinking models stay on chat completions"
+
+
+# --- Claude 5 adaptive thinking: native-endpoint routing -------------------------------------
+
+
+def test_adaptive_thinking_version_detection():
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-sonnet-5") is True
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-5.1") is True
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-haiku-4.5") is False
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-4.8") is False
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-3.5-haiku") is False
+    assert run_openrouter.anthropic_adaptive_thinking("openai/gpt-5.5") is False
+
+
+def native_body(thinking_text="Summarized reasoning about the position.", include_thinking=True):
+    content = []
+    if include_thinking:
+        content.append({"type": "thinking", "thinking": thinking_text, "signature": "sig-abc"})
+    content.append({"type": "text", "text": "FINAL ANSWER: e2e4"})
+    return {
+        "id": "msg-1",
+        "model": "claude-sonnet-5",
+        "role": "assistant",
+        "stop_reason": "end_turn",
+        "content": content,
+        "usage": {"input_tokens": 100, "output_tokens": 900},
+    }
+
+
+def test_claude5_thinking_routes_to_native_endpoint(monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
+    inferencer = run_openrouter.OpenrouterInferencer(
+        "anthropic/claude-sonnet-5", enable_thinking=True, backend="vercel-gateway"
+    )
+    session = ScriptedSession([FakeResponse(200, native_body())])
+    call = inferencer.call_model("prompt", session=session)
+
+    request = session.calls[0]
+    assert request["url"] == "https://ai-gateway.vercel.sh/v1/messages"
+    assert request["headers"]["anthropic-version"] == "2023-06-01"
+    assert request["payload"]["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert "reasoning" not in request["payload"]
+
+    assert call.ok and call.content == "FINAL ANSWER: e2e4"
+    assert call.thinking_content == "Summarized reasoning about the position."
+    assert call.thinking_source == "summary"
+    assert call.usage["prompt_tokens"] == 100 and call.usage["completion_tokens"] == 900
+    assert call.usage["total_tokens"] == 1000
+    # Raw native message (thinking blocks + signature) preserved for storage
+    assert call.raw_message["content"][0]["signature"] == "sig-abc"
+
+
+def test_claude5_without_thinking_stays_on_chat_completions(monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
+    inferencer = run_openrouter.OpenrouterInferencer(
+        "anthropic/claude-sonnet-5", enable_thinking=False, backend="vercel-gateway"
+    )
+    session = ScriptedSession([FakeResponse(200, success_body())])
+    call = inferencer.call_model("prompt", session=session)
+    assert session.calls[0]["url"] == "https://ai-gateway.vercel.sh/v1/chat/completions"
+    assert call.ok
+
+
+def test_native_parse_thinking_withheld_and_absent():
+    # Thinking block present but text withheld (empty) -> encrypted_only
+    withheld = native_body(thinking_text="", include_thinking=True)
+    content, thinking, source, usage = run_openrouter.parse_native_anthropic_message(withheld)
+    assert (content, thinking, source) == ("FINAL ANSWER: e2e4", "", "encrypted_only")
+    # No thinking block at all (adaptive skipped thinking) -> none
+    skipped = native_body(include_thinking=False)
+    content, thinking, source, usage = run_openrouter.parse_native_anthropic_message(skipped)
+    assert (thinking, source) == ("", "none")
+    assert usage["completion_tokens"] == 900
 
 
 # --- threaded runner end-to-end -------------------------------------------------------------

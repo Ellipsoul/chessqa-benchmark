@@ -82,25 +82,92 @@ def _get_thread_session() -> requests.Session:
     return session
 
 
-def build_reasoning_payload(model: str, backend: str) -> dict[str, Any]:
-    """Return the ``reasoning`` request field used when --enable-thinking is set.
+ANTHROPIC_NATIVE_URL = "https://ai-gateway.vercel.sh/v1/messages"
 
-    ``{"effort": "medium"}`` is the paper's setting and is probe-verified (2026-07-06) to
-    produce full-text thinking traces through the gateway for Anthropic models on the
-    classic thinking interface (e.g. claude-haiku-4.5: reasoning_tokens > 0, typed
-    ``reasoning.text`` blocks).
 
-    KNOWN LIMITATION: Claude 5-family models (e.g. claude-sonnet-5) use Anthropic's newer
-    *adaptive thinking* interface (``thinking.type: adaptive`` + ``output_config.effort``),
-    which the gateway's OpenAI-compatible endpoint does not currently map — every probed
-    ``reasoning`` shape either no-ops (0 reasoning tokens) or 400s, and providerOptions
-    passthrough is dropped. Probing the gateway's Anthropic-native /v1/messages endpoint
-    shows adaptive thinking *works* there but returns thinking blocks with EMPTY text and
-    only a cryptographic signature — the trace is redacted at the API level. So for those
-    models, thinking traces are currently unobtainable via any transport; the runner warns
-    after any --enable-thinking run that produced zero traces (check ``thinking_source``).
+def anthropic_adaptive_thinking(model: str) -> bool:
+    """True for Anthropic models on the Claude 5+ *adaptive thinking* interface.
+
+    Detected by the trailing major version in the slug (``anthropic/claude-sonnet-5`` -> 5,
+    ``anthropic/claude-haiku-4.5`` -> 4). Claude 5+ models reject the classic
+    ``thinking.type: enabled`` budget interface and require ``thinking.type: adaptive``.
     """
+    if not model.startswith("anthropic/claude"):
+        return False
+    version_token = model.rsplit("-", 1)[-1]
+    try:
+        return int(float(version_token)) >= 5
+    except ValueError:
+        return False
+
+
+def build_reasoning_payload(model: str, backend: str) -> dict[str, Any]:
+    """Return the thinking config sent when --enable-thinking is set (probe-verified 2026-07-10).
+
+    Two regimes, selected per model:
+
+    - Classic-thinking models (e.g. claude-haiku-4.5, and non-Anthropic reasoning models):
+      OpenRouter-style ``reasoning: {"effort": "medium"}`` on the chat-completions endpoint —
+      the paper's setting; yields FULL-TEXT traces (``thinking_source: full_text``).
+    - Claude 5-family adaptive-thinking models (``anthropic_adaptive_thinking``): full raw
+      CoT is withheld by Anthropic (``thinking.display`` accepts only
+      ``"omitted" | "summarized"``), and the OpenAI-compatible endpoint cannot express
+      adaptive thinking at all (every ``reasoning`` shape no-ops; ``display`` is not passed
+      through). The runner therefore routes these calls to the gateway's Anthropic-native
+      /v1/messages endpoint with ``{"type": "adaptive", "display": "summarized"}``, which
+      returns a REAL summarized trace (``thinking_source: summary``) — usable for coarse
+      analysis, but not the verbatim CoT that Phase 3 line-verification needs.
+
+    The returned dict is also recorded per run in ``runs.reasoning_config`` provenance.
+    """
+    if backend == "vercel-gateway" and anthropic_adaptive_thinking(model):
+        return {"type": "adaptive", "display": "summarized"}
     return {"effort": "medium"}
+
+
+def parse_native_anthropic_message(result: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
+    """Normalize an Anthropic-native /v1/messages response to the harness's shape.
+
+    Returns ``(content, thinking_content, thinking_source, usage)`` where usage carries the
+    chat-completions key names the rest of the pipeline expects (prompt_tokens /
+    completion_tokens / total_tokens) alongside the original native fields. thinking_source:
+    ``summary`` when a thinking block carries text under display=summarized;
+    ``encrypted_only`` when a thinking block exists but its text was withheld (signature
+    only); ``none`` when the model chose not to think (adaptive skips easy prompts).
+
+    Known trade-off: the native endpoint's usage has no per-call ``cost`` field (verified
+    live), so stats cost columns are zero for native-routed runs — reconcile spend from the
+    gateway dashboard or compute from token prices.
+    """
+    text_parts = []
+    thinking_parts = []
+    saw_thinking_block = False
+    for block in result.get("content", []) or []:
+        block_type = block.get("type")
+        if block_type == "text" and block.get("text"):
+            text_parts.append(block["text"])
+        elif block_type in ("thinking", "redacted_thinking"):
+            saw_thinking_block = True
+            if block.get("thinking"):
+                thinking_parts.append(block["thinking"])
+
+    if thinking_parts:
+        thinking_content, thinking_source = "\n".join(thinking_parts), "summary"
+    elif saw_thinking_block:
+        thinking_content, thinking_source = "", "encrypted_only"
+    else:
+        thinking_content, thinking_source = "", "none"
+
+    native_usage = result.get("usage", {}) or {}
+    input_tokens = native_usage.get("input_tokens", 0)
+    output_tokens = native_usage.get("output_tokens", 0)
+    usage = {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        **native_usage,
+    }
+    return "\n".join(text_parts).strip(), thinking_content, thinking_source, usage
 
 
 @dataclass
@@ -651,8 +718,21 @@ class OpenrouterInferencer:
             "max_tokens": self.max_tokens,
         }
 
+        # Claude 5-family thinking runs must go through the gateway's Anthropic-native
+        # endpoint: adaptive thinking (and its display=summarized traces) cannot be
+        # expressed on the OpenAI-compatible endpoint. See build_reasoning_payload.
+        use_native_anthropic = (
+            self.enable_thinking and self.backend == "vercel-gateway" and anthropic_adaptive_thinking(self.model)
+        )
+        request_url = self.url
+
         if self.enable_thinking:
-            data["reasoning"] = build_reasoning_payload(self.model, self.backend)
+            if use_native_anthropic:
+                request_url = ANTHROPIC_NATIVE_URL
+                headers["anthropic-version"] = "2023-06-01"
+                data["thinking"] = build_reasoning_payload(self.model, self.backend)
+            else:
+                data["reasoning"] = build_reasoning_payload(self.model, self.backend)
 
         if self.backend == "openrouter":
             data["usage"] = {"include": True}
@@ -696,7 +776,7 @@ class OpenrouterInferencer:
 
             try:
                 response = transport.post(
-                    self.url, headers=headers, data=json.dumps(data), timeout=self.timeout, stream=False
+                    request_url, headers=headers, data=json.dumps(data), timeout=self.timeout, stream=False
                 )
             except Exception as transport_error:
                 failure = transport_error
@@ -709,13 +789,23 @@ class OpenrouterInferencer:
             if response is not None and 200 <= response.status_code < 300:
                 try:
                     result = response.json()
-                    message = result["choices"][0]["message"]
-                    content = (message.get("content") or "").strip()
-                    thinking_content, thinking_source = extract_thinking(message)
-                    usage = result.get("usage", {}) or {}
-                    provider_meta = {
-                        key: result.get(key) for key in ("id", "model", "provider", "created") if result.get(key)
-                    }
+                    if use_native_anthropic:
+                        content, thinking_content, thinking_source, usage = parse_native_anthropic_message(result)
+                        # Preserve the full native message (thinking blocks + signatures).
+                        message = {
+                            key: result.get(key)
+                            for key in ("role", "content", "stop_reason", "model")
+                            if result.get(key) is not None
+                        }
+                        provider_meta = {key: result.get(key) for key in ("id", "model") if result.get(key)}
+                    else:
+                        message = result["choices"][0]["message"]
+                        content = (message.get("content") or "").strip()
+                        thinking_content, thinking_source = extract_thinking(message)
+                        usage = result.get("usage", {}) or {}
+                        provider_meta = {
+                            key: result.get(key) for key in ("id", "model", "provider", "created") if result.get(key)
+                        }
                     attempt.update(error_class="ok", billed_risk=1, retry_after_s=None, wait_s=None, outcome="success")
                     attempts.append(attempt)
                     return ModelCall(

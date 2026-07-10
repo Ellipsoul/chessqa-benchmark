@@ -150,8 +150,14 @@ def test_gateway_payload_shape(inferencer):
 def test_adaptive_thinking_version_detection():
     assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-sonnet-5") is True
     assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-5.1") is True
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-fable-5") is True
+    # Probe-verified 2026-07-10: the adaptive interface starts at 4.7, not 5 — opus-4.7/4.8
+    # reject thinking.type.enabled, while opus-4.6/sonnet-4.6/haiku-4.5 accept it.
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-4.8") is True
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-4.7") is True
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-4.6") is False
+    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-sonnet-4.6") is False
     assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-haiku-4.5") is False
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-4.8") is False
     assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-3.5-haiku") is False
     assert run_openrouter.anthropic_adaptive_thinking("openai/gpt-5.5") is False
 

@@ -8,13 +8,20 @@ SQL against `results/chessqa.sqlite3`). Update this file whenever the fleet chan
 treat it as the single source of truth for *which* models we run and *how each must be
 called*.
 
-Status (2026-07-10): **smoke-first approved by Aron.** Next step is a 50-task smoke
-(`--N-samples-per-task 1`) of all fleet models (~$17 typical, ~$30 padded) to collapse
-the [x1..x6] cost bands to ±20%, after which the tier composition gets re-cut with
-measured numbers. Tier 1 full runs are deferred until then — $126 (x1) was judged too
-steep to self-fund on banded estimates alone. Existing 50-task smokes that must NOT be
-re-run: `anthropic_claude-haiku-4.5.jsonl` (non-thinking, $0.197) and
-`anthropic_claude-sonnet-5-verbose-cot.jsonl` (verbose no-thinking baseline).
+Status (2026-07-12): **smoke campaign half done, paused on a transport defect.** 7 of 14
+smokes completed clean, 3 completed with ERROR rows, 7 held — the gateway kills
+non-streaming requests at ~340s and bills the killed attempts, so the remaining (mostly
+expensive) smokes wait for a streaming fix in `eval/run_openrouter.py`. Full results,
+incident analysis, and the exact resume playbook:
+**`docs/model-trials/2026-07-12-smoke-campaign.md`** — read it before running anything.
+Headline measured full-run projections (replacing the x1..x6 bands where measured):
+grok-4.3 $19, llama-4-maverick $4, haiku-4.5 non-thinking $15 (anchor reproduced),
+minimax-m3 $60, gpt-5.4-mini $128 (×4.6 over x1!), and lower bounds deepseek-v4-pro
+≥$21, qwen3.7-max ≥$93, kimi-k2.6 ≥$272. Every measurement fell inside its old band, but
+x1 was systematically optimistic (true multipliers ×1.3–×4.6) — the measured Tier-1 sum
+is **≥$325 vs the $126 x1 estimate**. Tier re-cut deferred until the held smokes are
+measured post-fix. Smokes that must NOT be re-run: haiku-4.5 non-thinking, sonnet-5
+verbose-cot, grok-4.3, llama-4-maverick, gpt-5.4-mini, minimax-m3.
 
 ## Cost model (how every estimate below was computed)
 
@@ -152,3 +159,11 @@ minimax-m3):**
 **Every model:** per-call cost comes from `usage.cost` on the chat-completions path only;
 results filenames encode variant suffixes (`-thinking`, `-piecearr`, `-fmt2`,
 `-openrouter`) and resume/`--eval-only` require identical flags to find the file.
+
+**Transport (2026-07-12, OPEN):** the gateway path kills non-streaming requests at ~340s
+(`error_class: connection`, `http_status: null`) and the killed attempts are billed
+upstream. Models decoding slower than ~96 tok/s cannot complete a 32K generation and
+their long tasks fail permanently (4 billed attempts each). Do not run thinking smokes or
+full runs until streaming lands in `eval/run_openrouter.py` — spec and evidence in
+`docs/model-trials/2026-07-12-smoke-campaign.md`. Track real spend via
+`GET https://ai-gateway.vercel.sh/v1/credits`, not by summing `usage.cost`.

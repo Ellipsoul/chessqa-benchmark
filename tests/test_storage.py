@@ -1,7 +1,9 @@
 """Storage-layer tests: schema, idempotent ingest of the real smoke-run fixtures, live-run parity."""
 
 import json
+import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -79,6 +81,77 @@ def test_ingest_smoke_fixtures(conn):
     sample = conn.execute("SELECT prompt_hash, raw_message, n_attempts FROM results LIMIT 1").fetchone()
     assert sample["prompt_hash"] is not None and len(sample["prompt_hash"]) == 64
     assert sample["raw_message"] is None and sample["n_attempts"] is None
+
+
+class FlakyLockConn:
+    """Duck-typed sqlite3.Connection whose executescript raises 'database is locked' the
+    first N times. Models the real failure: on deadlock-prone lock upgrades SQLite returns
+    SQLITE_BUSY *without* invoking the busy handler, so busy_timeout never gets a say."""
+
+    def __init__(self, real: sqlite3.Connection, failures: int, message: str = "database is locked"):
+        self._real = real
+        self._failures_left = failures
+        self._message = message
+        self.executescript_calls = 0
+
+    def executescript(self, sql):
+        self.executescript_calls += 1
+        if self._failures_left > 0:
+            self._failures_left -= 1
+            raise sqlite3.OperationalError(self._message)
+        return self._real.executescript(sql)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_ensure_schema_retries_locked_ddl(tmp_path, monkeypatch):
+    """Concurrent-startup race (observed 2026-07-12: 2 of 3 simultaneous resumes died in
+    ensure_schema): locked DDL must be retried, not raised out of storage.connect()."""
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)  # keep retries instant
+    real = sqlite3.connect(str(tmp_path / "flaky.sqlite3"))
+    real.row_factory = sqlite3.Row
+    flaky = FlakyLockConn(real, failures=2)
+
+    storage.ensure_schema(flaky)
+
+    assert flaky.executescript_calls == 3
+    tables = {row["name"] for row in real.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"schema_meta", "tasks", "runs", "results", "attempts"} <= tables
+    real.close()
+
+
+def test_ensure_schema_does_not_retry_other_errors(tmp_path):
+    """Only lock contention is retryable; real errors (corruption, bad SQL) surface at once."""
+    real = sqlite3.connect(str(tmp_path / "broken.sqlite3"))
+    flaky = FlakyLockConn(real, failures=100, message="no such table: nonsense")
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        storage.ensure_schema(flaky)
+
+    assert flaky.executescript_calls == 1
+    real.close()
+
+
+def test_connect_outlasts_concurrent_writer(tmp_path, monkeypatch):
+    """End-to-end startup race: a sibling holds the write lock on a fresh DB past
+    busy_timeout while we create the schema. connect() must wait it out and succeed."""
+    monkeypatch.setattr(storage, "BUSY_TIMEOUT_MS", 100)
+    db_path = tmp_path / "race.sqlite3"
+    # check_same_thread=False: the release Timer commits from another thread
+    holder = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+
+    releaser = threading.Timer(0.5, holder.commit)
+    releaser.start()
+    try:
+        connection = storage.connect(db_path)
+        tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"schema_meta", "tasks", "runs", "results", "attempts"} <= tables
+        connection.close()
+    finally:
+        releaser.join()
+        holder.close()
 
 
 def test_ingest_idempotent(conn):

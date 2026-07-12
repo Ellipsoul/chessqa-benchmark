@@ -50,6 +50,8 @@ import json
 import os
 import random
 import re
+import sqlite3
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1114,6 +1116,33 @@ def setup_results_db(args, tasks: list[dict[str, Any]]):
     return conn, run_id
 
 
+def make_db_record_hook(conn: sqlite3.Connection, run_id: int, save_interval: int):
+    """Build the per-result SQLite mirror hook (batched commits every save_interval rows).
+
+    Non-fatal by contract: the JSONL is canonical and the DB is a rebuildable index, so a
+    locked database (e.g. a sibling run holding the write lock past busy_timeout) must
+    never kill a paid inference run — warn and move on.
+    """
+    recorded_count = 0
+
+    def record_to_db(result: dict[str, Any]) -> None:
+        nonlocal recorded_count
+        try:
+            storage.upsert_result(conn, run_id, result)
+            recorded_count += 1
+            if recorded_count % save_interval == 0:
+                conn.commit()
+        except sqlite3.OperationalError as exc:
+            print(
+                f"WARNING: SQLite mirror skipped task {result.get('task_id')}: {exc}. "
+                "The row is safe in the results JSONL; rebuild the DB with "
+                "`python eval/storage.py ingest results/*.jsonl --dataset-root benchmark`.",
+                file=sys.stderr,
+            )
+
+    return record_to_db
+
+
 def main():
     """CLI entry: run (or resume, or re-evaluate) a full benchmark pass and report stats.
 
@@ -1254,17 +1283,7 @@ def main():
 
             record_hook = None
             if conn is not None:
-                recorded_count = 0
-
-                def record_to_db(result: dict[str, Any]) -> None:
-                    """Mirror each completed row into SQLite as it lands (batched commits)."""
-                    nonlocal recorded_count
-                    storage.upsert_result(conn, run_id, result)
-                    recorded_count += 1
-                    if recorded_count % args.save_interval == 0:
-                        conn.commit()
-
-                record_hook = record_to_db
+                record_hook = make_db_record_hook(conn, run_id, args.save_interval)
 
             try:
                 new_results = inferencer.run_inference(
@@ -1283,13 +1302,20 @@ def main():
                 # run aborted so the DB is honest about incompleteness, then let the
                 # interrupt propagate. Resuming with the same flags picks up cleanly.
                 if conn is not None:
-                    conn.commit()
-                    storage.finalize_run(conn, run_id, None, status="aborted")
+                    try:
+                        conn.commit()
+                        storage.finalize_run(conn, run_id, None, status="aborted")
+                    except sqlite3.OperationalError as exc:
+                        print(f"WARNING: could not mark DB run aborted: {exc}", file=sys.stderr)
                     conn.close()
                 print("\nInterrupted — completed rows are saved; DB run marked 'aborted'. Resume with the same flags.")
                 raise
             if conn is not None:
-                conn.commit()
+                try:
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    print(f"WARNING: SQLite mid-run commit failed: {exc}. Continuing; the JSONL is canonical.",
+                          file=sys.stderr)
             end_time = time.time()
 
             # A thinking run in which no task returned any trace almost certainly means the
@@ -1441,10 +1467,18 @@ def main():
 
     # Final DB sync: upsert every row (idempotent — catches rows completed in previous
     # resumed invocations that this invocation didn't re-run), then finalize the run.
+    # Non-fatal: JSONL + stats are already on disk; the DB can always be rebuilt.
     if conn is not None:
-        for result in results:
-            storage.upsert_result(conn, run_id, result)
-        storage.finalize_run(conn, run_id, stats_payload, status="complete")
+        try:
+            for result in results:
+                storage.upsert_result(conn, run_id, result)
+            storage.finalize_run(conn, run_id, stats_payload, status="complete")
+        except sqlite3.OperationalError as exc:
+            print(
+                f"WARNING: final SQLite sync failed: {exc}. Results JSONL and stats are saved; "
+                "rebuild the DB with `python eval/storage.py ingest results/*.jsonl --dataset-root benchmark`.",
+                file=sys.stderr,
+            )
         conn.close()
 
     # Print per-task-category stats with cost and extraction success information

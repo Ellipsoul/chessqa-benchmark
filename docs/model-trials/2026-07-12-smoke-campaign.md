@@ -145,7 +145,9 @@ haiku-4.5 non-thinking, sonnet-5 verbose-cot.
 **Done, damaged (resume AFTER streaming fix — ERROR rows are retried automatically):**
 deepseek-v4-pro (20 ERROR), qwen3.7-max (10), kimi-k2.6 (7).
 
-**Held (run AFTER streaming fix, cheapest-first):** gpt-5.6-sol, anthropic/claude-opus-4.6,
+**Held (run AFTER streaming fix, cheapest-first):** gpt-5.6-sol, anthropic/claude-opus-4.8
+(swapped in for opus-4.6, Aron 2026-07-12 — same list price, stronger model; costs the
+full_text trace: 4.8 is adaptive/summary-only with no per-call cost field),
 anthropic/claude-sonnet-5 (thinking), anthropic/claude-haiku-4.5 (thinking),
 google/gemini-3.5-flash, deepseek/deepseek-r1, and LAST google/gemini-3.1-pro-preview.
 xai/grok-4.5: still 503 upstream (re-probed 2026-07-12); grok-4.3 already smoked as the
@@ -164,7 +166,8 @@ merged so `--no-db` is no longer required, but stays a safe fallback. After any 
 `python eval/storage.py ingest results/*.jsonl --dataset-root benchmark`.
 
 Anthropic native-routed runs (sonnet-5, and any ≥4.7 model) report **no per-call cost**
-— price them as tokens × list ($/M): sonnet-5 in 2.00/out 10.00, opus-4.6 5.00/25.00,
+— price them as tokens × list ($/M): sonnet-5 in 2.00/out 10.00, opus-4.8 5.00/25.00
+(same list price as opus-4.6, verified by Aron 2026-07-12),
 haiku-4.5 1.00/5.00 (full snapshot in `eval/smoke_analysis.py`).
 
 ## Follow-up plan: two separate slices (Aron, 2026-07-12)

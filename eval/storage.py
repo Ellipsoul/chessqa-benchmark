@@ -27,12 +27,15 @@ when the public web explorer gets built. Schema notes:
 """
 
 import argparse
+import contextlib
 import glob
 import hashlib
 import json
+import random
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -41,6 +44,11 @@ DEFAULT_DB_NAME = "chessqa.sqlite3"
 # Concurrent runs share one DB and the runner batches commits (--save-interval), so a
 # sibling process can hold the write lock far longer than sqlite3's 5s default.
 BUSY_TIMEOUT_MS = 30_000
+# busy_timeout is not enough for concurrent *startup*: on deadlock-prone lock upgrades
+# (the rollback->WAL journal switch on a fresh DB, WAL snapshot conflicts) SQLite returns
+# SQLITE_BUSY without invoking the busy handler at all (observed 2026-07-12: 2 of 3
+# simultaneous resumes died in ensure_schema). Setup is idempotent, so retry it instead.
+STARTUP_LOCK_ATTEMPTS = 10
 
 # Filename-suffix tokens appended by the runner (see _build_variant_suffix / -thinking),
 # in the order they appear in a stem; parsed back off right-to-left by run_meta_from_filename.
@@ -141,28 +149,57 @@ def _utcnow() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _retry_while_locked(fn, conn: sqlite3.Connection, attempts: int = STARTUP_LOCK_ATTEMPTS):
+    """Run fn(), retrying with jittered sleeps on 'database is locked/busy' errors.
+
+    Only for idempotent startup work (pragmas, CREATE IF NOT EXISTS DDL). Any other
+    OperationalError, or lock contention that outlasts every attempt, is re-raised.
+    """
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if ("locked" not in message and "busy" not in message) or attempt == attempts - 1:
+                raise
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            time.sleep(random.uniform(0.05, 0.3) * (attempt + 1))
+
+
 def connect(db_path: Path | str) -> sqlite3.Connection:
     """Open (creating if needed) the results database with WAL mode and the v1 schema."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    ensure_schema(conn)
+
+    def configure() -> None:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA synchronous = NORMAL")
+
+    try:
+        _retry_while_locked(configure, conn)
+        ensure_schema(conn)
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA_DDL)
-    conn.execute(
-        "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (DB_SCHEMA_VERSION,),
-    )
-    conn.commit()
+    def apply() -> None:
+        conn.executescript(SCHEMA_DDL)
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (DB_SCHEMA_VERSION,),
+        )
+        conn.commit()
+
+    _retry_while_locked(apply, conn)
 
 
 def compute_dataset_hash(dataset_root: Path | str) -> str:

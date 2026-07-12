@@ -73,7 +73,7 @@ The frontier-update headline claims (paper Phase 2) come from this tier.
 | model | fidelity | full-run $ (x1) | full-run $ (x6 worst case) | role |
 |---|---|---|---|---|
 | anthropic/claude-sonnet-5 | summary | 93 | 549 | Anthropic frontier |
-| anthropic/claude-opus-4.6 | **full_text** | 90 | 518 | strongest Anthropic verbatim CoT — Phase 3 anchor |
+| anthropic/claude-opus-4.8 | summary | 101 | 583 | Anthropic score ceiling (swapped in for opus-4.6, Aron 2026-07-12: same list price, stronger model; haiku-4.5-thinking becomes the Anthropic full_text source for Phase 3) |
 | anthropic/claude-haiku-4.5 (thinking) | **full_text** | 144 | 860 | cheap-tier thinking run (verbose when thinking: 8.2K tokens on trial) |
 | openai/gpt-5.6-sol | summary | 66 | 376 | OpenAI frontier |
 | google/gemini-3.5-flash | **full_text** | 101 | 601 | Google mid-tier, full_text |
@@ -84,7 +84,8 @@ The frontier-update headline claims (paper Phase 2) come from this tier.
 
 Optional add-ons, in priority order (not in either tier's total):
 openai/gpt-5.1-thinking ($74–442, direct paper GPT-5-thinking lineage),
-anthropic/claude-opus-4.8 ($101–583, Anthropic score ceiling),
+anthropic/claude-opus-4.6 ($90–518, strongest Anthropic verbatim-CoT model — re-add if
+Phase 3 needs a frontier-strength full_text Anthropic anchor beyond haiku-4.5-thinking),
 anthropic/claude-fable-5 ($146–838, Mythos-tier ceiling),
 zai/glm-5.2 ($196–1,173, third open lab; verbose, 306 s/task — wall-clock risk),
 xai/grok-4.5 (unpriced — was 503 upstream throughout trials; re-probe, then replace
@@ -160,10 +161,13 @@ minimax-m3):**
 results filenames encode variant suffixes (`-thinking`, `-piecearr`, `-fmt2`,
 `-openrouter`) and resume/`--eval-only` require identical flags to find the file.
 
-**Transport (2026-07-12, OPEN):** the gateway path kills non-streaming requests at ~340s
-(`error_class: connection`, `http_status: null`) and the killed attempts are billed
-upstream. Models decoding slower than ~96 tok/s cannot complete a 32K generation and
-their long tasks fail permanently (4 billed attempts each). Do not run thinking smokes or
-full runs until streaming lands in `eval/run_openrouter.py` — spec and evidence in
-`docs/model-trials/2026-07-12-smoke-campaign.md`. Track real spend via
+**Transport (FIXED 2026-07-12, PR #20):** the gateway kills **non-streaming** requests at
+~340s of wire silence and bills the killed attempts. The runner now streams every
+chat-completions request (SSE, reassembled by `consume_chat_sse`) so decode speed no
+longer caps completable tokens; kill-shot verified at 433s / 32,768 tokens on
+deepseek-v4-pro with zero connection errors. The Anthropic-native `/v1/messages` path
+(adaptive models) remains non-streaming by design — its short summarized runs never hit
+the wall. Mid-stream drops after tokens arrived are `stream_drop` (billed-risk, 2-attempt
+cap); `ttft_ms` is recorded per result. Evidence and history:
+`docs/model-trials/2026-07-12-smoke-campaign.md` (Incident 2). Still track real spend via
 `GET https://ai-gateway.vercel.sh/v1/credits`, not by summing `usage.cost`.

@@ -15,7 +15,8 @@ End-to-end flow:
 
 1. Load every ``*.jsonl`` under ``--dataset-root`` (optionally subsampled per task type).
 2. Resume: match tasks against the existing results file by ``task_id``; only unfinished
-   tasks (plus previous ``max_token_reached`` failures) are re-run. ``--no-resume`` skips this.
+   tasks are re-run (``max_token_reached`` rows are kept as recorded outcomes unless
+   ``--retry-capped`` is passed). ``--no-resume`` skips this.
 3. For each task, ``format_prompt`` resolves the placeholders baked into the question
    (CONTEXT_PLACEHOLDER, FORMAT_EXAMPLE_PLACEHOLDER) according to ``--add-context`` and
    ``--use-format-example-group``.
@@ -1346,18 +1347,22 @@ def re_evaluate_results(results: list[dict[str, Any]], max_tokens: int) -> list[
 
 
 def filter_incomplete_tasks(
-    tasks: list[dict[str, Any]], existing_results: dict[str, dict[str, Any]]
+    tasks: list[dict[str, Any]], existing_results: dict[str, dict[str, Any]], retry_capped: bool = False
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Split tasks into (incomplete -> re-run, complete -> keep) for resume.
 
     A task counts as complete only if its saved result has a non-empty response that isn't
     an "ERROR:..." retry-exhaustion marker. Results scored ``max_token_reached`` are
-    deliberately re-run too — truncation is treated as an infrastructure failure worth
-    retrying, not a model answer.
+    re-run only when ``retry_capped`` (--retry-capped) is set: upstream retried them
+    unconditionally as presumed infrastructure failures, but this project records 32K-cap
+    exhaustion as an experimental outcome per model/category (policy in
+    docs/model-trials/2026-07-12-smoke-campaign.md), and the unconditional retry
+    re-billed every capped task on every resume of a run.
     """
     incomplete_tasks = []
     complete_results = []
     max_token_retry_count = 0
+    max_token_kept_count = 0
 
     for task in tasks:
         task_id = task.get("task_id")
@@ -1370,12 +1375,13 @@ def filter_incomplete_tasks(
                 and existing_result["inference"]["response"]
                 and not existing_result["inference"]["response"].startswith("ERROR")
             ):
-                # Check if this result had max_token_reached error - if so, retry it
                 error_type = existing_result["inference"].get("error_type", "")
-                if error_type == "max_token_reached":
+                if error_type == "max_token_reached" and retry_capped:
                     incomplete_tasks.append(task)
                     max_token_retry_count += 1
                 else:
+                    if error_type == "max_token_reached":
+                        max_token_kept_count += 1
                     complete_results.append(existing_result)
             else:
                 incomplete_tasks.append(task)
@@ -1383,7 +1389,12 @@ def filter_incomplete_tasks(
             incomplete_tasks.append(task)
 
     if max_token_retry_count > 0:
-        print(f"Found {max_token_retry_count} previous results with 'max_token_reached' error - will retry these tasks")
+        print(f"Found {max_token_retry_count} previous 'max_token_reached' results - retrying them (--retry-capped)")
+    if max_token_kept_count > 0:
+        print(
+            f"Keeping {max_token_kept_count} previous 'max_token_reached' results as recorded outcomes "
+            "(pass --retry-capped to re-run them)"
+        )
 
     return incomplete_tasks, complete_results
 
@@ -1564,7 +1575,7 @@ def main():
             results_file = args.output_dir / f"{model_safe_name}.jsonl"
             existing_results = load_existing_results(results_file)
 
-            incomplete_tasks, complete_results = filter_incomplete_tasks(tasks, existing_results)
+            incomplete_tasks, complete_results = filter_incomplete_tasks(tasks, existing_results, args.retry_capped)
 
             print(f"Tasks already completed: {len(complete_results)}")
             print(f"Tasks needing inference: {len(incomplete_tasks)}")
@@ -1947,6 +1958,12 @@ def parse_arguments():
         "--no-resume",
         action="store_true",
         help="Start inference from scratch, ignore existing results (default: resume from existing)",
+    )
+    parser.add_argument(
+        "--retry-capped",
+        action="store_true",
+        help="On resume, re-run tasks whose previous result was 'max_token_reached' (upstream's original "
+        "behavior). Default: keep them as recorded experimental outcomes without re-billing.",
     )
     parser.add_argument(
         "--db-path",

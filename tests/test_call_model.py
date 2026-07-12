@@ -465,3 +465,28 @@ def test_runner_end_to_end_threads(inferencer, monkeypatch, tmp_path):
     existing = run_openrouter.load_existing_results(jsonl_path)
     incomplete, complete = run_openrouter.filter_incomplete_tasks(tasks, existing)
     assert incomplete == [] and len(complete) == 30
+
+
+def test_resume_keeps_capped_rows_unless_retry_capped():
+    """max_token_reached rows are recorded experimental outcomes: resume keeps them by
+    default and only re-runs them under --retry-capped (upstream's original behavior)."""
+    tasks = [make_task(0), make_task(1), make_task(2)]
+
+    def result_for(task, error_type, response="FINAL ANSWER: e2e4"):
+        row = dict(task)
+        row["inference"] = {"response": response, "error_type": error_type}
+        return row
+
+    existing = {
+        tasks[0]["task_id"]: result_for(tasks[0], "correct"),
+        tasks[1]["task_id"]: result_for(tasks[1], "max_token_reached"),
+        tasks[2]["task_id"]: result_for(tasks[2], "wrong_answer", response="ERROR: gave up"),
+    }
+
+    incomplete, complete = run_openrouter.filter_incomplete_tasks(tasks, existing)
+    assert [task["task_id"] for task in incomplete] == [tasks[2]["task_id"]], "only the ERROR row re-runs"
+    assert len(complete) == 2, "the capped row is kept as a recorded outcome"
+
+    incomplete, complete = run_openrouter.filter_incomplete_tasks(tasks, existing, retry_capped=True)
+    assert {task["task_id"] for task in incomplete} == {tasks[1]["task_id"], tasks[2]["task_id"]}
+    assert len(complete) == 1

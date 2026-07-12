@@ -38,6 +38,9 @@ from pathlib import Path
 
 DB_SCHEMA_VERSION = "1"
 DEFAULT_DB_NAME = "chessqa.sqlite3"
+# Concurrent runs share one DB and the runner batches commits (--save-interval), so a
+# sibling process can hold the write lock far longer than sqlite3's 5s default.
+BUSY_TIMEOUT_MS = 30_000
 
 # Filename-suffix tokens appended by the runner (see _build_variant_suffix / -thinking),
 # in the order they appear in a stem; parsed back off right-to-left by run_meta_from_filename.
@@ -142,9 +145,10 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     """Open (creating if needed) the results database with WAL mode and the v1 schema."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA synchronous = NORMAL")
     ensure_schema(conn)

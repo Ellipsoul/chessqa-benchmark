@@ -1,6 +1,7 @@
 """Storage-layer tests: schema, idempotent ingest of the real smoke-run fixtures, live-run parity."""
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,80 @@ def test_tasks_upsert_from_dataset(conn):
     # Idempotent
     storage.upsert_tasks(conn, tasks, dataset_hash="testhash", source_file="motifs.jsonl")
     assert conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"] == 600
+
+
+def _minimal_row(task_id: str) -> dict:
+    return {
+        "task_id": task_id, "task_type": "synthetic", "task_category": "Synthetic",
+        "question": "q", "correct_answer": "a", "answer_type": "single",
+        "inference": {"response": "FINAL ANSWER: a", "extracted": "a",
+                      "extraction_successful": True, "is_correct": True, "error_type": "correct"},
+    }
+
+
+def test_connect_sets_generous_busy_timeout(conn):
+    # Concurrent runs share one DB, and the runner's record hook batches commits, so a
+    # sibling process can hold the write lock far longer than sqlite3's 5s default.
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+
+def test_concurrent_writers_do_not_error(tmp_path):
+    """Two connections upserting into the same DB (the multi-run scenario) both succeed."""
+    db_path = tmp_path / "shared.sqlite3"
+    storage.connect(db_path).close()  # create schema before threads race on DDL
+    errors = []
+
+    def writer(name: str) -> None:
+        connection = storage.connect(db_path)
+        try:
+            run_id = storage.get_or_create_run(connection, name, {"model": name})
+            for row_index in range(25):
+                storage.upsert_result(connection, run_id, _minimal_row(f"{name}_{row_index}"))
+            connection.commit()
+        except Exception as exc:  # noqa: BLE001 - collected and asserted below
+            errors.append(exc)
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=writer, args=(f"run{worker}",)) for worker in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    check = storage.connect(db_path)
+    assert check.execute("SELECT COUNT(*) AS n FROM results").fetchone()["n"] == 50
+    check.close()
+
+
+def test_record_hook_survives_locked_db(tmp_path, capsys):
+    """A locked DB must never kill the (paid) inference run: the hook warns and continues."""
+    import run_openrouter
+
+    db_path = tmp_path / "locked.sqlite3"
+    hook_conn = storage.connect(db_path)
+    run_id = storage.get_or_create_run(hook_conn, "lock-test", {"model": "m"})
+    hook_conn.execute("PRAGMA busy_timeout = 100")  # don't wait 30s in the test
+
+    hook = run_openrouter.make_db_record_hook(hook_conn, run_id, save_interval=1)
+
+    blocker = storage.connect(db_path)
+    blocker.execute("BEGIN IMMEDIATE")  # hold the write lock like a sibling run would
+    try:
+        hook(_minimal_row("blocked_task"))  # must not raise
+    finally:
+        blocker.rollback()
+        blocker.close()
+    stderr = capsys.readouterr().err
+    assert "WARNING" in stderr and "blocked_task" in stderr
+
+    # Connection stays usable once the lock clears; later rows still land.
+    hook(_minimal_row("later_task"))
+    hook_conn.commit()
+    rows = hook_conn.execute("SELECT task_id FROM results").fetchall()
+    assert [row["task_id"] for row in rows] == ["later_task"]
+    hook_conn.close()
 
 
 def test_live_row_with_attempts_roundtrip(conn):

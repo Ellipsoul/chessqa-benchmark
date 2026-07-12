@@ -21,6 +21,30 @@ class FakeResponse:
             raise ValueError("no body")
         return self._body
 
+    def close(self):
+        pass
+
+
+class FakeStreamResponse:
+    """A 2xx SSE response: iter_lines yields the scripted lines (or raises a scripted
+    exception mid-stream, simulating a transport drop)."""
+
+    def __init__(self, lines, status_code=200):
+        self.status_code = status_code
+        self._lines = list(lines)
+        self.headers = {}
+        self.text = ""
+        self.closed = False
+
+    def iter_lines(self):
+        for item in self._lines:
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+    def close(self):
+        self.closed = True
+
 
 class ScriptedSession:
     """Returns (or raises) the scripted outcomes in order; records every request."""
@@ -33,7 +57,7 @@ class ScriptedSession:
     def post(self, url, headers=None, data=None, timeout=None, stream=False):
         payload = json.loads(data)
         self.requests_made.append(payload)
-        self.calls.append({"url": url, "headers": headers or {}, "payload": payload})
+        self.calls.append({"url": url, "headers": headers or {}, "payload": payload, "stream": stream})
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -53,6 +77,43 @@ def success_body(content="FINAL ANSWER: e2e4", reasoning=None):
     }
 
 
+def sse_lines_from_body(body, piece_len=4):
+    """Chop a stored non-streamed chat body into the SSE lines a streamed request delivers.
+
+    The parity fixture: reasoning streams as delta.reasoning plus indexed typed
+    reasoning_details fragments, content as delta.content pieces, usage in a final chunk
+    with empty choices (stream_options.include_usage behavior), plus a comment keepalive
+    and [DONE] terminator for grammar coverage.
+    """
+    message = body["choices"][0]["message"]
+    base = {key: body[key] for key in ("id", "model", "provider", "created") if key in body}
+
+    def event(payload):
+        return ("data: " + json.dumps(payload)).encode()
+
+    lines = [b": KEEPALIVE", event({**base, "choices": [{"delta": {"role": "assistant", "content": ""}}]})]
+    reasoning = message.get("reasoning") or ""
+    for start in range(0, len(reasoning), piece_len):
+        piece = reasoning[start : start + piece_len]
+        delta = {
+            "reasoning": piece,
+            "reasoning_details": [
+                {"type": "reasoning.text", "text": piece, "format": "anthropic-claude-v1", "index": 0}
+            ],
+        }
+        lines.append(event({**base, "choices": [{"delta": delta}]}))
+    content = message.get("content") or ""
+    for start in range(0, len(content), piece_len):
+        lines.append(event({**base, "choices": [{"delta": {"content": content[start : start + piece_len]}}]}))
+    lines.append(event({**base, "choices": [], "usage": body.get("usage")}))
+    lines.append(b"data: [DONE]")
+    return lines
+
+
+def streamed_success(content="FINAL ANSWER: e2e4", reasoning=None):
+    return FakeStreamResponse(sse_lines_from_body(success_body(content, reasoning)))
+
+
 @pytest.fixture()
 def inferencer(monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
@@ -67,7 +128,7 @@ def no_sleep(monkeypatch):
 
 
 def test_success_first_attempt(inferencer):
-    session = ScriptedSession([FakeResponse(200, success_body(reasoning="thinking hard"))])
+    session = ScriptedSession([streamed_success(reasoning="thinking hard")])
     call = inferencer.call_model("prompt", session=session)
     assert call.ok and call.content == "FINAL ANSWER: e2e4"
     assert (call.thinking_content, call.thinking_source) == ("thinking hard", "full_text")
@@ -75,12 +136,18 @@ def test_success_first_attempt(inferencer):
     assert call.raw_message["content"] == "FINAL ANSWER: e2e4"
     assert len(call.attempts) == 1 and call.attempts[0]["outcome"] == "success"
     assert call.latency_ms is not None
+    assert call.ttft_ms is not None and call.attempts[0]["ttft_ms"] == call.ttft_ms
+    assert call.attempts[0]["stream_chunks"] > 0
+    # Chat-completions requests are streamed (the 340s-wall fix)
+    assert session.calls[0]["stream"] is True
+    assert session.calls[0]["payload"]["stream"] is True
+    assert session.calls[0]["payload"]["stream_options"] == {"include_usage": True}
 
 
 def test_429_honors_retry_after_and_penalizes_limiter(inferencer, no_sleep, monkeypatch):
     session = ScriptedSession([
         FakeResponse(429, headers={"Retry-After": "7"}, text="rate limited"),
-        FakeResponse(200, success_body()),
+        streamed_success(),
     ])
     penalties = []
     limiter = throttle.RateLimiter(1000, 1000)
@@ -117,7 +184,7 @@ def test_cheap_503_retries_to_success(inferencer, no_sleep):
     session = ScriptedSession([
         FakeResponse(503, text="unavailable"),
         requests.ConnectionError("reset"),
-        FakeResponse(200, success_body()),
+        streamed_success(),
     ])
     call = inferencer.call_model("prompt", session=session)
     assert call.ok and len(call.attempts) == 3
@@ -126,7 +193,9 @@ def test_cheap_503_retries_to_success(inferencer, no_sleep):
 
 
 def test_parse_error_on_2xx_never_regenerates(inferencer, no_sleep):
-    session = ScriptedSession([FakeResponse(200, {"unexpected": "shape"})])
+    # A 2xx whose body is not an SSE stream (e.g. a plain JSON error blob): received and
+    # billed, so never regenerate — same taxonomy as the pre-streaming parse case.
+    session = ScriptedSession([FakeStreamResponse([b'data: {"unexpected": "shape"}', b"data: [DONE]"])])
     call = inferencer.call_model("prompt", session=session)
     assert not call.ok and len(session.requests_made) == 1
     assert call.attempts[0]["error_class"] == "parse"
@@ -134,7 +203,7 @@ def test_parse_error_on_2xx_never_regenerates(inferencer, no_sleep):
 
 
 def test_gateway_payload_shape(inferencer):
-    session = ScriptedSession([FakeResponse(200, success_body())])
+    session = ScriptedSession([streamed_success()])
     inferencer.enable_thinking = True
     inferencer.call_model("prompt", session=session)
     call = session.calls[0]
@@ -142,6 +211,94 @@ def test_gateway_payload_shape(inferencer):
     assert call["payload"]["reasoning"] == {"effort": "medium"}
     assert "usage" not in call["payload"] and "provider" not in call["payload"]
     assert "thinking" not in call["payload"], "classic-thinking models stay on chat completions"
+
+
+# --- streaming transport (the 340s-wall fix) --------------------------------------------------
+
+
+def test_stream_parity_with_nonstreamed_body(inferencer):
+    """A stored non-streamed response vs the same content reassembled from SSE chunks:
+    identical extracted answer, usage, thinking content, and thinking_source."""
+    body = success_body(content="I think.\nFINAL ANSWER: e2e4", reasoning="Long reasoning about the position.")
+    session = ScriptedSession([FakeStreamResponse(sse_lines_from_body(body, piece_len=3))])
+    call = inferencer.call_model("prompt", session=session)
+
+    reference_message = body["choices"][0]["message"]
+    expected_thinking, expected_source = run_openrouter.extract_thinking(reference_message)
+    expected_answer, expected_extracted_ok = run_openrouter.extract_answer(reference_message["content"])
+
+    assert call.ok
+    assert call.content == reference_message["content"]
+    assert call.usage == body["usage"]
+    assert (call.thinking_content, call.thinking_source) == (expected_thinking, expected_source)
+    streamed_answer, streamed_ok = run_openrouter.extract_answer(call.content)
+    assert (streamed_answer, streamed_ok) == (expected_answer, expected_extracted_ok) == ("e2e4", True)
+    # The reassembled message is byte-identical where downstream code looks
+    assert call.raw_message["content"] == reference_message["content"]
+    assert call.raw_message["reasoning"] == reference_message["reasoning"]
+    assert call.raw_message["reasoning_details"] == reference_message["reasoning_details"]
+
+
+def test_midstream_drop_is_billed_risk_capped(inferencer, no_sleep):
+    """A drop AFTER tokens streamed = the provider generated (and billed) output we lost:
+    retry under the billed-risk cap, with partial counters recorded per attempt."""
+    def dropped():
+        lines = sse_lines_from_body(success_body(reasoning="deep thought"))[:4]
+        lines.append(requests.ConnectionError("connection reset mid-stream"))
+        return FakeStreamResponse(lines)
+
+    session = ScriptedSession([dropped() for _ in range(10)])
+    call = inferencer.call_model("prompt", session=session)
+    assert not call.ok
+    assert len(session.requests_made) == throttle.EXPENSIVE_MAX_ATTEMPTS
+    for attempt in call.attempts:
+        assert attempt["error_class"] == "stream_drop"
+        assert attempt["billed_risk"] == 1
+        assert attempt["stream_chunks"] > 0
+        assert attempt["reasoning_chars"] > 0
+        assert attempt["ttft_ms"] is not None
+    assert call.attempts[-1]["outcome"] == "gave_up"
+    assert "streamed chunks" in call.content
+
+
+def test_drop_before_any_token_stays_cheap(inferencer, no_sleep):
+    """A drop before the first token = nothing generated: the old cheap connection retry."""
+    session = ScriptedSession(
+        [FakeStreamResponse([requests.ConnectionError("reset before first byte")]) for _ in range(10)]
+    )
+    call = inferencer.call_model("prompt", session=session)
+    assert not call.ok
+    assert len(session.requests_made) == inferencer.max_retries, "cheap retries use the full budget"
+    assert all(attempt["error_class"] == "connection" for attempt in call.attempts)
+    assert all(attempt["billed_risk"] == 0 for attempt in call.attempts)
+    assert all(attempt["stream_chunks"] == 0 for attempt in call.attempts)
+
+
+def test_midstream_drop_then_success(inferencer, no_sleep):
+    lines = sse_lines_from_body(success_body(reasoning="deep thought"))[:4]
+    lines.append(requests.ConnectionError("blip"))
+    session = ScriptedSession([FakeStreamResponse(lines), streamed_success(reasoning="deep thought")])
+    call = inferencer.call_model("prompt", session=session)
+    assert call.ok and call.content == "FINAL ANSWER: e2e4"
+    assert [attempt["error_class"] for attempt in call.attempts] == ["stream_drop", "ok"]
+
+
+def test_merge_reasoning_fragments_without_index():
+    """Index-less fragments continue the most recent entry of the same type; a type
+    switch starts a new entry (so extract_thinking's per-entry newline join stays valid)."""
+    entries, indexed = [], {}
+    for fragment in [
+        {"type": "reasoning.text", "text": "Hel"},
+        {"type": "reasoning.text", "text": "lo"},
+        {"type": "reasoning.summary", "summary": "short"},
+        {"type": "reasoning.text", "text": "again", "signature": "sig-1"},
+    ]:
+        run_openrouter._merge_reasoning_fragment(entries, indexed, fragment)
+    assert entries == [
+        {"type": "reasoning.text", "text": "Hello"},
+        {"type": "reasoning.summary", "summary": "short"},
+        {"type": "reasoning.text", "text": "again", "signature": "sig-1"},
+    ]
 
 
 # --- Claude 5 adaptive thinking: native-endpoint routing -------------------------------------
@@ -205,7 +362,7 @@ def test_claude5_without_thinking_stays_on_chat_completions(monkeypatch):
     inferencer = run_openrouter.OpenrouterInferencer(
         "anthropic/claude-sonnet-5", enable_thinking=False, backend="vercel-gateway"
     )
-    session = ScriptedSession([FakeResponse(200, success_body())])
+    session = ScriptedSession([streamed_success()])
     call = inferencer.call_model("prompt", session=session)
     assert session.calls[0]["url"] == "https://ai-gateway.vercel.sh/v1/chat/completions"
     assert call.ok
@@ -244,7 +401,7 @@ def test_runner_end_to_end_threads(inferencer, monkeypatch, tmp_path):
     import storage
 
     tasks = [make_task(index) for index in range(30)]
-    session = ScriptedSession([FakeResponse(200, success_body())] * 30)
+    session = ScriptedSession([streamed_success() for _ in range(30)])
     lock_free_session = session  # ScriptedSession.pop(0) is GIL-atomic enough for identical outcomes
     monkeypatch.setattr(run_openrouter, "_get_thread_session", lambda: lock_free_session)
 

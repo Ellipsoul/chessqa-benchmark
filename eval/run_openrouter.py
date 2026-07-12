@@ -21,10 +21,15 @@ End-to-end flow:
    ``--use-format-example-group``.
 4. Fan out over a ``ThreadPoolExecutor`` (``--workers``) paced by a shared rate limiter
    (``--rps``/``--burst``; see eval/throttle.py for the retry/backoff policy); each worker
-   POSTs to the selected backend's chat completions API, records every attempt, and pulls
-   thinking traces out of the response's ``reasoning``/``reasoning_details`` fields,
-   recording a ``thinking_source`` fidelity tag (full_text / summary / encrypted_only / ...)
-   per task.
+   POSTs to the selected backend's chat completions API as a STREAMING (SSE) request —
+   reassembled by ``consume_chat_sse`` into the non-streaming message shape — so long
+   generations keep bytes moving and survive the gateway's ~340s wire-idle kill (Incident 2,
+   docs/model-trials/2026-07-12-smoke-campaign.md; the Anthropic-native /v1/messages path
+   for adaptive-thinking models remains non-streaming). Every attempt is recorded, with
+   ``ttft_ms`` and partial stream counters; thinking traces come from the reassembled
+   ``reasoning``/``reasoning_details`` fields, tagged with a ``thinking_source`` fidelity
+   label (full_text / summary / encrypted_only / ...) per task. A monitor thread shows
+   live tokens/s and cumulative recorded cost in the tqdm postfix.
 5. ``extract_answer`` takes the last ``FINAL ANSWER:`` line (with ``\\boxed{}`` fallback);
    ``evaluate_answer_with_error_type`` scores it (exact match for "single", set match for
    "multi") and classifies failures. Note this classifies *answers only* — nothing inspects
@@ -45,6 +50,7 @@ useful after changing extraction/scoring logic.
 """
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -193,6 +199,7 @@ class ModelCall:
     provider_meta: dict[str, Any] | None = None
     attempts: list[dict[str, Any]] = field(default_factory=list)
     latency_ms: int | None = None
+    ttft_ms: int | None = None
     ok: bool = False
     error: str | None = None
 
@@ -304,6 +311,213 @@ def extract_thinking(message: dict[str, Any]) -> tuple[str, str]:
     if any(isinstance(detail, dict) and detail.get("type") == "reasoning.encrypted" for detail in details):
         return "", "encrypted_only"
     return "", "none"
+
+
+class StreamDrop(Exception):
+    """Transport failure while consuming a streamed (SSE) chat-completions response.
+
+    Carries how much had already arrived so retry classification can distinguish a
+    mid-generation drop (tokens streamed -> the provider generated, and billed, output;
+    retrying regenerates it, so it falls under the billed-risk attempt cap) from a drop
+    before any token arrived (the old cheap pre-generation connection failure).
+    """
+
+    def __init__(self, cause: Exception, stream_info: dict[str, Any]):
+        super().__init__(f"{type(cause).__name__}: {cause}")
+        self.cause = cause
+        self.stream_info = stream_info
+
+
+def _merge_reasoning_fragment(entries: list[Any], indexed: dict[Any, dict[str, Any]], fragment: Any) -> None:
+    """Fold one streamed reasoning_details fragment into the accumulated entries.
+
+    Providers stream reasoning_details as many small fragments of what the non-streaming
+    response returns as one block per type. Fragments carrying an ``index`` merge into
+    the entry first seen with that index; index-less fragments continue the most recent
+    entry of the same type. String payload fields (text/summary/data) concatenate;
+    everything else (format, signature, id) last-write-wins. The ``index`` key itself is
+    dropped so the reassembled message matches the non-streaming shape.
+    """
+    if not isinstance(fragment, dict):
+        # extract_thinking tolerates bare strings inside reasoning_details; keep them.
+        if fragment:
+            entries.append(fragment)
+        return
+    key = fragment.get("index")
+    entry = None
+    if key is not None:
+        entry = indexed.get(key)
+    elif entries and isinstance(entries[-1], dict) and entries[-1].get("type") == fragment.get("type"):
+        entry = entries[-1]
+    if entry is None:
+        entry = {name: value for name, value in fragment.items() if name != "index"}
+        entries.append(entry)
+        if key is not None:
+            indexed[key] = entry
+        return
+    for name, value in fragment.items():
+        if name == "index" or value is None:
+            continue
+        if name in ("text", "summary", "data") and isinstance(value, str) and isinstance(entry.get(name), str):
+            entry[name] += value
+        else:
+            entry[name] = value
+
+
+def consume_chat_sse(
+    response: requests.Response, started_at_monotonic: float, on_delta=None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Drain a streamed chat-completions response and reassemble the non-streaming body.
+
+    This is the core of the 340s-wall fix: with ``stream: true`` the gateway forwards
+    bytes as the provider generates them, so the wire is never silent long enough for the
+    gateway's ~340s idle timer to kill the socket (Incident 2 in
+    docs/model-trials/2026-07-12-smoke-campaign.md). The reassembled dict is shaped
+    exactly like the non-streaming response — ``choices[0].message`` with content /
+    reasoning / typed reasoning_details, ``usage`` from the final chunk (requested via
+    ``stream_options.include_usage``) — so extract_thinking, thinking_source tagging,
+    cost capture, and storage see no difference.
+
+    Returns ``(result, stream_info)``. stream_info records ``ttft_ms`` (first token,
+    measured from ``started_at_monotonic``), ``stream_chunks`` (delta events — the best
+    available mid-flight proxy for completion tokens; the exact count only exists in the
+    final usage chunk), and content/reasoning character counts. ``on_delta`` (if given)
+    is called once per delta event for live progress reporting.
+
+    Failure modes: any exception while iterating the stream raises StreamDrop carrying
+    the partial stream_info (transport truncation is overwhelmingly more likely than a
+    provider emitting malformed JSON mid-stream); a 2xx that yields no SSE data events,
+    or events with neither deltas nor usage, raises ValueError — classified "parse"
+    downstream: billed and received, never regenerate.
+    """
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    detail_entries: list[Any] = []
+    indexed_details: dict[Any, dict[str, Any]] = {}
+    meta: dict[str, Any] = {}
+    usage: dict[str, Any] | None = None
+    finish_reason = None
+    role = None
+    data_events = 0
+    delta_events = 0
+    first_token_ms: int | None = None
+
+    def stream_info() -> dict[str, Any]:
+        return {
+            "ttft_ms": first_token_ms,
+            "stream_chunks": delta_events,
+            "content_chars": sum(len(part) for part in content_parts),
+            "reasoning_chars": sum(len(part) for part in reasoning_parts),
+        }
+
+    try:
+        for raw_line in response.iter_lines():
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
+            if line.startswith(":"):  # SSE comment keepalive (e.g. ": OPENROUTER PROCESSING")
+                continue
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            if payload == "[DONE]":
+                break
+            chunk = json.loads(payload)
+            data_events += 1
+            for key in ("id", "model", "provider", "created"):
+                if chunk.get(key) is not None and key not in meta:
+                    meta[key] = chunk[key]
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+            delta = choice.get("delta") or {}
+            if delta.get("role"):
+                role = delta["role"]
+            got_tokens = False
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+                got_tokens = True
+            if delta.get("reasoning"):
+                reasoning_parts.append(delta["reasoning"])
+                got_tokens = True
+            for fragment in delta.get("reasoning_details") or []:
+                _merge_reasoning_fragment(detail_entries, indexed_details, fragment)
+                got_tokens = True
+            if got_tokens:
+                delta_events += 1
+                if first_token_ms is None:
+                    first_token_ms = int((time.monotonic() - started_at_monotonic) * 1000)
+                if on_delta is not None:
+                    on_delta()
+    except Exception as stream_error:
+        raise StreamDrop(stream_error, stream_info()) from stream_error
+
+    if data_events == 0:
+        raise ValueError("2xx response produced no SSE data events (streaming not honored?)")
+    if delta_events == 0 and usage is None:
+        raise ValueError(f"SSE stream had {data_events} data events but no message deltas or usage")
+
+    message: dict[str, Any] = {"role": role or "assistant", "content": "".join(content_parts)}
+    if reasoning_parts:
+        message["reasoning"] = "".join(reasoning_parts)
+    if detail_entries:
+        message["reasoning_details"] = detail_entries
+    result = dict(meta)
+    result["choices"] = [{"message": message, "finish_reason": finish_reason}]
+    if usage is not None:
+        result["usage"] = usage
+    return result, stream_info()
+
+
+class RunProgress:
+    """Thread-safe live counters behind the tqdm postfix (forward progress + burn rate).
+
+    Workers tick ``on_stream_delta`` once per streamed SSE delta event (~one token) and
+    ``on_task_done`` with each finished task's usage; a monitor thread snapshots these to
+    display live tokens/s and cumulative recorded cost while long generations are still
+    in flight — previously the bar only moved on task completion, which for multi-minute
+    generations meant zero visible progress while money was being spent.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._stream_chunks = 0
+        self._cost = 0.0
+
+    def on_stream_delta(self) -> None:
+        with self._lock:
+            self._stream_chunks += 1
+
+    def on_task_done(self, usage: dict[str, Any]) -> None:
+        with self._lock:
+            self._cost += usage.get("cost", 0.0) or 0.0
+
+    def snapshot(self) -> tuple[int, float]:
+        with self._lock:
+            return self._stream_chunks, self._cost
+
+
+def _progress_monitor(pbar: tqdm, progress: RunProgress, stop: threading.Event, interval_s: float = 2.0) -> None:
+    """Refresh the tqdm postfix with live tokens/s and cumulative run cost.
+
+    tokens/s is approximated from streamed delta events (~one token each; exact counts
+    only exist in each task's final usage chunk). Cost sums recorded ``usage.cost`` —
+    native-routed Anthropic runs report none (see parse_native_anthropic_message), so
+    their burn rate must still come from the gateway credits meter.
+    """
+    last_chunks, last_time = progress.snapshot()[0], time.monotonic()
+    while not stop.wait(interval_s):
+        chunks, cost = progress.snapshot()
+        now = time.monotonic()
+        rate = (chunks - last_chunks) / max(now - last_time, 1e-6)
+        last_chunks, last_time = chunks, now
+        with tqdm.get_lock():
+            pbar.set_postfix({"tok/s": f"{rate:.0f}", "cost": f"${cost:.2f}"}, refresh=True)
 
 
 def load_tasks(
@@ -600,6 +814,7 @@ def run_one_task(
     inferencer: "OpenrouterInferencer",
     format_example_group: int,
     limiter: "throttle.RateLimiter | None",
+    progress: "RunProgress | None" = None,
 ) -> dict[str, Any]:
     """Worker entry point: run one task end-to-end (format -> call -> extract -> score).
 
@@ -608,7 +823,7 @@ def run_one_task(
     an ``inference`` block — the record that becomes one line of the results JSONL.
     """
     prompt = format_prompt(task, inferencer.add_context, format_example_group)
-    call = inferencer.call_model(prompt, limiter=limiter, session=_get_thread_session())
+    call = inferencer.call_model(prompt, limiter=limiter, session=_get_thread_session(), progress=progress)
     extracted, extraction_successful = extract_answer(call.content)
 
     # Use answer_type-aware evaluation with error type classification
@@ -633,6 +848,7 @@ def run_one_task(
         "provider_meta": call.provider_meta,
         "attempts": call.attempts,
         "latency_ms": call.latency_ms,
+        "ttft_ms": call.ttft_ms,
     }
     return result
 
@@ -700,10 +916,20 @@ class OpenrouterInferencer:
         prompt: str,
         limiter: "throttle.RateLimiter | None" = None,
         session: requests.Session | None = None,
+        progress: RunProgress | None = None,
     ) -> ModelCall:
         """POST one chat completion with rate limiting and classified, logged retries.
 
         Request notes:
+        - Chat-completions requests are STREAMED (``stream: true`` +
+          ``stream_options.include_usage``) and reassembled by ``consume_chat_sse`` into
+          the exact non-streaming message shape. This defeats the Vercel AI Gateway's
+          ~340s wire-idle kill on long generations (Incident 2 in
+          docs/model-trials/2026-07-12-smoke-campaign.md). The Anthropic-native
+          /v1/messages path stays NON-streaming for now: adaptive runs return short
+          summarized traces, never hit the wall, and use a different SSE grammar
+          (message_start / content_block_delta / message_delta) — revisit only if a
+          native run ever stalls at ~340s.
         - ``--enable-thinking`` maps to ``build_reasoning_payload`` (probe-verified; see
           its docstring for the Claude 5 adaptive-thinking limitation).
         - OpenRouter-only fields: ``usage: {include: true}`` (per-call cost accounting)
@@ -713,10 +939,14 @@ class OpenrouterInferencer:
         Retry policy (see eval/throttle.py): 429/502/503/connection failures retry up to
         ``max_retries`` with Retry-After honored (a 429 penalizes the *shared* limiter so
         all threads pause); read timeouts and 500/504/524 may have been billed upstream,
-        so they retry at most ``throttle.EXPENSIVE_MAX_ATTEMPTS`` times total; permanent
-        4xx and parse failures never retry. Every attempt is recorded in
-        ``ModelCall.attempts`` (mirrored into the results JSONL) so retry pressure and
-        billing discrepancies are diagnosable from our own data.
+        so they retry at most ``throttle.EXPENSIVE_MAX_ATTEMPTS`` times total; a stream
+        that drops AFTER tokens arrived ("stream_drop") is billed the same way — the
+        provider generated output we lost — and shares that cap, while a drop before any
+        token remains a cheap connection retry. Permanent 4xx and parse failures never
+        retry. Every attempt is recorded in ``ModelCall.attempts`` (mirrored into the
+        results JSONL), including per-attempt ttft_ms / stream_chunks / partial character
+        counts for streamed attempts, so retry pressure and billing discrepancies are
+        diagnosable from our own data.
 
         After exhausting retries, ``content`` is the literal string "ERROR: ...", which
         resume logic later treats as incomplete.
@@ -744,6 +974,13 @@ class OpenrouterInferencer:
                 data["thinking"] = build_reasoning_payload(self.model, self.backend)
             else:
                 data["reasoning"] = build_reasoning_payload(self.model, self.backend)
+
+        # The 340s-wall fix: stream every chat-completions request so bytes move on the
+        # wire continuously. The native path stays non-streaming (see call_model docstring).
+        use_streaming = not use_native_anthropic
+        if use_streaming:
+            data["stream"] = True
+            data["stream_options"] = {"include_usage": True}
 
         if self.backend == "openrouter":
             data["usage"] = {"include": True}
@@ -784,23 +1021,24 @@ class OpenrouterInferencer:
             attempt_start = time.monotonic()
             response = None
             failure: Exception | None = None
+            stream_info: dict[str, Any] | None = None
 
             try:
                 response = transport.post(
-                    request_url, headers=headers, data=json.dumps(data), timeout=self.timeout, stream=False
+                    request_url, headers=headers, data=json.dumps(data), timeout=self.timeout, stream=use_streaming
                 )
             except Exception as transport_error:
                 failure = transport_error
 
-            duration_ms = int((time.monotonic() - attempt_start) * 1000)
-            attempt["duration_ms"] = duration_ms
             attempt["http_status"] = response.status_code if response is not None else None
 
-            # Success path: 2xx that also parses cleanly.
+            # Success path: 2xx that also parses cleanly. For streamed requests "parsing"
+            # is draining the SSE stream — that is where a long generation spends its life,
+            # so duration_ms is computed after consumption, not after the POST returns.
             if response is not None and 200 <= response.status_code < 300:
                 try:
-                    result = response.json()
                     if use_native_anthropic:
+                        result = response.json()
                         content, thinking_content, thinking_source, usage = parse_native_anthropic_message(result)
                         # Preserve the full native message (thinking blocks + signatures).
                         message = {
@@ -810,6 +1048,14 @@ class OpenrouterInferencer:
                         }
                         provider_meta = {key: result.get(key) for key in ("id", "model") if result.get(key)}
                     else:
+                        if use_streaming:
+                            result, stream_info = consume_chat_sse(
+                                response,
+                                attempt_start,
+                                on_delta=progress.on_stream_delta if progress is not None else None,
+                            )
+                        else:
+                            result = response.json()
                         message = result["choices"][0]["message"]
                         content = (message.get("content") or "").strip()
                         thinking_content, thinking_source = extract_thinking(message)
@@ -817,7 +1063,11 @@ class OpenrouterInferencer:
                         provider_meta = {
                             key: result.get(key) for key in ("id", "model", "provider", "created") if result.get(key)
                         }
+                    duration_ms = int((time.monotonic() - attempt_start) * 1000)
+                    attempt["duration_ms"] = duration_ms
                     attempt.update(error_class="ok", billed_risk=1, retry_after_s=None, wait_s=None, outcome="success")
+                    if stream_info is not None:
+                        attempt.update(stream_info)
                     attempts.append(attempt)
                     return ModelCall(
                         content=content,
@@ -828,22 +1078,53 @@ class OpenrouterInferencer:
                         provider_meta=provider_meta,
                         attempts=attempts,
                         latency_ms=duration_ms,
+                        ttft_ms=stream_info["ttft_ms"] if stream_info is not None else None,
                         ok=True,
                     )
                 except Exception as parse_error:
-                    # 2xx body we couldn't parse: billed and received — do NOT regenerate.
+                    # 2xx body we couldn't parse (or a stream that dropped): billed-risk —
+                    # classification below decides whether regenerating is allowed.
                     failure = parse_error
+
+            duration_ms = int((time.monotonic() - attempt_start) * 1000)
+            attempt["duration_ms"] = duration_ms
 
             # Failure path: classify, decide, record, maybe sleep.
             if response is not None and not (200 <= response.status_code < 300):
                 error_class, retriable, billed_risk = throttle.classify(response, None)
                 retry_after_s = throttle.parse_retry_after(response.headers)
                 error_detail = f"HTTP {response.status_code}: {response.text[:300]}"
+            elif isinstance(failure, StreamDrop):
+                # Mid-stream drop with tokens already received: the provider generated
+                # (and billed) output we lost — retry under the billed-risk attempt cap.
+                # A drop before any token is the old cheap pre-generation failure.
+                stream_info = failure.stream_info
+                if stream_info["stream_chunks"] > 0:
+                    error_class, retriable, billed_risk = "stream_drop", True, True
+                else:
+                    error_class, retriable, billed_risk = throttle.classify(None, failure.cause)
+                retry_after_s = None
+                error_detail = (
+                    f"{type(failure.cause).__name__} after {stream_info['stream_chunks']} streamed chunks"
+                    f" ({stream_info['content_chars']} content + {stream_info['reasoning_chars']} reasoning chars):"
+                    f" {failure.cause}"
+                )
             else:
                 error_class, retriable, billed_risk = throttle.classify(None, failure)
                 retry_after_s = None
-                body_hint = f" body={response.text[:200]!r}" if (response is not None and error_class == "parse") else ""
+                body_hint = ""
+                if response is not None and error_class == "parse":
+                    try:
+                        body_hint = f" body={response.text[:200]!r}"
+                    except Exception:
+                        body_hint = ""
                 error_detail = f"{type(failure).__name__}: {failure}{body_hint}"
+
+            if use_streaming and response is not None:
+                # Release the pooled connection: an aborted or partially-read stream
+                # would otherwise hold its socket.
+                with contextlib.suppress(Exception):
+                    response.close()
 
             attempt_budget = throttle.EXPENSIVE_MAX_ATTEMPTS if billed_risk else self.max_retries
             will_retry = retriable and attempt_number < attempt_budget
@@ -855,6 +1136,10 @@ class OpenrouterInferencer:
                 wait_s=wait_s,
                 outcome="retried" if will_retry else ("gave_up" if retriable else "fatal"),
             )
+            if stream_info is not None:
+                # Partial-progress evidence for billing forensics: how much of the
+                # generation had streamed before the attempt died.
+                attempt.update(stream_info)
             attempts.append(attempt)
 
             if not will_retry:
@@ -909,18 +1194,31 @@ class OpenrouterInferencer:
         print(f"Processing {len(tasks)} tasks with {num_workers} worker threads...")
         results: list[dict[str, Any]] = []
         pending_batch: list[dict[str, Any]] = []
+        progress = RunProgress()
+        monitor_stop = threading.Event()
 
         with ThreadPoolExecutor(max_workers=max(1, num_workers)) as executor:
-            futures = [executor.submit(run_one_task, task, self, format_example_group, limiter) for task in tasks]
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing tasks"):
-                result = future.result()
-                results.append(result)
-                pending_batch.append(result)
-                if record_hook is not None:
-                    record_hook(result)
-                if output_path and len(pending_batch) >= save_interval:
-                    self._save_incremental_results(pending_batch, output_path)
-                    pending_batch = []
+            futures = [
+                executor.submit(run_one_task, task, self, format_example_group, limiter, progress) for task in tasks
+            ]
+            with tqdm(total=len(futures), desc="Processing tasks") as pbar:
+                monitor = threading.Thread(target=_progress_monitor, args=(pbar, progress, monitor_stop), daemon=True)
+                monitor.start()
+                try:
+                    for future in as_completed(futures):
+                        result = future.result()
+                        progress.on_task_done(result["inference"].get("usage") or {})
+                        pbar.update(1)
+                        results.append(result)
+                        pending_batch.append(result)
+                        if record_hook is not None:
+                            record_hook(result)
+                        if output_path and len(pending_batch) >= save_interval:
+                            self._save_incremental_results(pending_batch, output_path)
+                            pending_batch = []
+                finally:
+                    monitor_stop.set()
+                    monitor.join(timeout=5)
 
         if output_path and pending_batch:
             self._save_incremental_results(pending_batch, output_path)

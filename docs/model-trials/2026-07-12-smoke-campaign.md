@@ -80,7 +80,21 @@ across whole save batches). Fixed same day (merged via PR #16): 30s busy_timeout
 non-fatal record hook + non-fatal DB touchpoints. Residual rule: the JSONL is canonical;
 if in doubt run with `--no-db` and ingest afterwards.
 
-## Incident 2 — the 340s wall (OPEN; blocks the remaining smokes)
+## Incident 2 — the 340s wall (FIXED 2026-07-12 — Slice 1 streaming transport landed)
+
+> **Status update (2026-07-12, Slice 1):** chat-completions requests now stream (SSE,
+> `stream: true` + `stream_options.include_usage`) and are reassembled into the exact
+> non-streaming message shape (`consume_chat_sse` in `eval/run_openrouter.py`), so bytes
+> move continuously and the gateway's idle timer never fires. Mid-stream drops after
+> tokens arrived are classified `stream_drop` (billed-risk, 2-attempt cap) with partial
+> counters recorded per attempt; `ttft_ms` is recorded per result; live tokens/s and
+> cumulative recorded cost show in the tqdm postfix. The Anthropic-native /v1/messages
+> path (adaptive models) remains non-streaming — different SSE grammar, short summarized
+> runs, never hit the wall. Kill-shot note: the spec below named a structural
+> state-tracking task, but deepseek's structural tasks all finished ≤190s in the smoke —
+> the actual wall victims were Motifs/Short Tactics — so the verification used
+> `motifs_discovered_check_0076`, a task that died at the wall 4× on
+> deepseek/deepseek-v4-pro. Slice 2 (campaign resume) remains separate.
 
 **Mechanism.** The runner sends non-streaming requests (`stream=False`,
 `eval/run_openrouter.py` ~line 790). During a multi-minute generation zero bytes move on

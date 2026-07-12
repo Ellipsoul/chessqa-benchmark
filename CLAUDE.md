@@ -23,6 +23,13 @@ Other docs: `docs/ChessQA_Paper.pdf` (the paper) and `docs/Chess_as_a_Benchmark_
 - Communication: direct, technically specific, evidence-grounded, no filler encouragement. Honest about what's novel vs. derivative. Scope expansion welcome when justified.
 - Refactoring policy: replacing components — even the whole harness (Inspect AI) or gateway (Vercel AI Gateway vs. OpenRouter, trace fidelity being the deciding criterion) — is on the table *after* reproduction on the original harness. Refactor *with* him, not *for* him.
 
+## Git remotes and PRs (IMPORTANT — repeated past mistake)
+
+This repo is a fork: `origin` = https://github.com/Ellipsoul/chessqa-benchmark (ours), `upstream` = https://github.com/CSSLab/chessqa-benchmark (the paper authors' — never open PRs there). Without a configured default, `gh pr create` targets the **fork parent**, and this has accidentally opened PRs against CSSLab more than once.
+
+- **All PRs target `Ellipsoul/chessqa-benchmark`, base `main`.** Pass `--repo Ellipsoul/chessqa-benchmark` to every `gh pr` command even though `gh repo set-default Ellipsoul/chessqa-benchmark` has been set (2026-07-12) — belt and suspenders, and fresh clones won't have the default.
+- After `gh pr create`, verify the printed URL starts with `github.com/Ellipsoul/` before doing anything else. If a PR ever lands on CSSLab, close it immediately with an apology comment.
+
 ## Reproduction reference points (from the paper)
 
 15 models / 23 runs via OpenRouter, default sampling, thinking at medium effort with 32K token budget (8,192 for non-thinking). Headlines: GPT-5-thinking best overall at 79.3%; only 4 runs exceed 50%; thinking adds +14.7pp on average (pairwise); Short Tactics is the hardest category (mean 17.4%); Position Judgment is 5-way classification (random = 20%) and stays ≤40% even for top models; Structural is easiest (GPT-5* at 97%). Answer evaluation is exact match (set match for multi-answer). Adding piece-arrangement context (`--add-context`) significantly improves scores — the paper's evidence that board-state hallucination is a core bottleneck.

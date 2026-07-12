@@ -153,7 +153,28 @@ Anthropic native-routed runs (sonnet-5, and any ≥4.7 model) report **no per-ca
 — price them as tokens × list ($/M): sonnet-5 in 2.00/out 10.00, opus-4.6 5.00/25.00,
 haiku-4.5 1.00/5.00 (full snapshot in `eval/smoke_analysis.py`).
 
-## The streaming fix (spec for the next session)
+## Follow-up plan: two separate slices (Aron, 2026-07-12)
+
+The remaining work is deliberately split — do NOT combine them in one session:
+
+- **Slice 1 — streaming fix only.** Implement and verify streaming (spec below). Ends at
+  a merged PR with the kill-shot test passing. No campaign runs beyond the single
+  cheap verification task.
+- **Slice 2 — campaign resume.** Runs the "Campaign state and resume playbook" section
+  above, exactly as written, on the fixed harness: recover the 37 ERROR rows in
+  deepseek-v4-pro/qwen3.7-max/kimi-k2.6, then the held seven cheapest-first, then the
+  measured tier re-cut in `docs/model-fleet.md` (Aron signs off on the re-cut).
+
+**Policy on 32K-cap exhaustion (`max_token_reached`):** this is an experimental result,
+not a harness defect — record and report it as a failure mode per model/category. The
+original paper treats it the same way: "Max Token Reached" is one of the six outcome
+classes in its Figure 4 response-evaluation breakdown (figure-only; never quantified in
+prose), with thin slices concentrated in thinking models on Short Tactics and Position
+Judgement. Our 2026 rates are much higher (kimi-k2.6 24%, minimax-m3 16%, gpt-5.4-mini
+12% of the smoke) — today's reasoners think longer against the same 32K budget the paper
+fixed, which is itself a Phase 2 finding. Streaming does not (and should not) change it.
+
+## The streaming fix (spec for Slice 1)
 
 Change `call_api` in `eval/run_openrouter.py` transport-only; prompts, flags, scoring,
 filenames unchanged, so results remain comparable and resume just works.
@@ -174,8 +195,7 @@ filenames unchanged, so results remain comparable and resume just works.
 5. Tests: (a) parity — short task streamed vs stored non-streamed response ⇒ identical
    extracted answer/usage/thinking_source; (b) the kill-shot — one structural
    state-tracking task on deepseek-v4-pro (the exact profile that died at 340s) completes
-   with >20.5K completion tokens or runs >340s wall-clock; costs cents. Then resume
-   deepseek/qwen/kimi to recover the 37 ERROR rows before starting the held seven.
+   with >20.5K completion tokens or runs >340s wall-clock; costs cents.
 
-Acceptance: zero `error_class: connection` at ~340s across a full smoke; deepseek smoke
-reaches 50/50 completed rows.
+Slice 1 acceptance: parity + kill-shot green, `ruff` + pytest green, PR merged. Campaign
+runs (recovering the 37 ERROR rows, the held seven) belong to Slice 2 — playbook above.

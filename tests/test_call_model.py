@@ -283,6 +283,34 @@ def test_midstream_drop_then_success(inferencer, no_sleep):
     assert [attempt["error_class"] for attempt in call.attempts] == ["stream_drop", "ok"]
 
 
+def test_clean_eof_without_terminator_is_stream_drop(inferencer, no_sleep):
+    """Observed live (qwen3.7-max, 2026-07-12): the gateway cuts streams at a hard ~785s
+    total-duration ceiling with a CLEAN close — no exception, no [DONE], no finish_reason,
+    no usage. That must be a billed-risk stream_drop retry, never a silent empty success."""
+    def truncated():
+        lines = sse_lines_from_body(success_body(reasoning="deep thought"))[:4]  # cut before content/usage/[DONE]
+        return FakeStreamResponse(lines)
+
+    session = ScriptedSession([truncated() for _ in range(10)])
+    call = inferencer.call_model("prompt", session=session)
+    assert not call.ok
+    assert len(session.requests_made) == throttle.EXPENSIVE_MAX_ATTEMPTS
+    assert all(attempt["error_class"] == "stream_drop" for attempt in call.attempts)
+    assert all(attempt["billed_risk"] == 1 for attempt in call.attempts)
+    assert "truncated upstream" in call.content
+
+
+def test_usage_without_done_is_accepted(inferencer):
+    """A stream that delivers usage (or finish_reason) but no [DONE] line is complete —
+    only a stream with no terminator of any kind counts as truncated."""
+    body = success_body()
+    lines = [line for line in sse_lines_from_body(body) if not line.startswith(b"data: [DONE]")]
+    session = ScriptedSession([FakeStreamResponse(lines)])
+    call = inferencer.call_model("prompt", session=session)
+    assert call.ok and call.content == "FINAL ANSWER: e2e4"
+    assert call.usage == body["usage"]
+
+
 def test_merge_reasoning_fragments_without_index():
     """Index-less fragments continue the most recent entry of the same type; a type
     switch starts a new entry (so extract_thinking's per-entry newline join stays valid)."""

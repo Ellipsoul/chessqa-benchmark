@@ -400,6 +400,7 @@ def consume_chat_sse(
     role = None
     data_events = 0
     delta_events = 0
+    saw_done = False
     first_token_ms: int | None = None
 
     def stream_info() -> dict[str, Any]:
@@ -421,6 +422,7 @@ def consume_chat_sse(
                 continue
             payload = line[len("data:") :].strip()
             if payload == "[DONE]":
+                saw_done = True
                 break
             chunk = json.loads(payload)
             data_events += 1
@@ -461,6 +463,16 @@ def consume_chat_sse(
         raise ValueError("2xx response produced no SSE data events (streaming not honored?)")
     if delta_events == 0 and usage is None:
         raise ValueError(f"SSE stream had {data_events} data events but no message deltas or usage")
+    if not saw_done and usage is None and finish_reason is None:
+        # Clean EOF mid-generation with no terminator of any kind. Observed live
+        # 2026-07-12: the gateway cuts streams at a hard ~785s total-duration ceiling
+        # (distinct from the fixed 340s idle wall) — four qwen3.7-max streams all closed
+        # at exactly 785.1s with no [DONE]/finish_reason/usage, mid-sentence. Treat as a
+        # dropped stream (billed-risk retry), never as a successful empty response.
+        raise StreamDrop(
+            RuntimeError("SSE stream ended without [DONE], finish_reason, or usage (truncated upstream)"),
+            stream_info(),
+        )
 
     message: dict[str, Any] = {"role": role or "assistant", "content": "".join(content_parts)}
     if reasoning_parts:

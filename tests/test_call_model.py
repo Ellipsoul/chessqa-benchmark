@@ -498,8 +498,10 @@ def test_runner_end_to_end_threads(inferencer, monkeypatch, tmp_path):
 
 def test_resume_keeps_capped_rows_unless_retry_capped():
     """max_token_reached rows are recorded experimental outcomes: resume keeps them by
-    default and only re-runs them under --retry-capped (upstream's original behavior)."""
-    tasks = [make_task(0), make_task(1), make_task(2)]
+    default and only re-runs them under --retry-capped (upstream's original behavior).
+    A capped row counts even with an EMPTY response — thinking models that burn the whole
+    budget on reasoning emit no answer text (the 2026-07-13 deepseek re-bill regression)."""
+    tasks = [make_task(index) for index in range(5)]
 
     def result_for(task, error_type, response="FINAL ANSWER: e2e4"):
         row = dict(task)
@@ -510,12 +512,18 @@ def test_resume_keeps_capped_rows_unless_retry_capped():
         tasks[0]["task_id"]: result_for(tasks[0], "correct"),
         tasks[1]["task_id"]: result_for(tasks[1], "max_token_reached"),
         tasks[2]["task_id"]: result_for(tasks[2], "wrong_answer", response="ERROR: gave up"),
+        tasks[3]["task_id"]: result_for(tasks[3], "max_token_reached", response=""),  # all-reasoning cap
+        tasks[4]["task_id"]: result_for(tasks[4], "format_error", response=""),  # scrub-shaped poison row
     }
 
     incomplete, complete = run_openrouter.filter_incomplete_tasks(tasks, existing)
-    assert [task["task_id"] for task in incomplete] == [tasks[2]["task_id"]], "only the ERROR row re-runs"
-    assert len(complete) == 2, "the capped row is kept as a recorded outcome"
+    assert {task["task_id"] for task in incomplete} == {tasks[2]["task_id"], tasks[4]["task_id"]}, (
+        "ERROR rows and empty non-cap rows re-run; both cap shapes are kept"
+    )
+    assert len(complete) == 3
 
     incomplete, complete = run_openrouter.filter_incomplete_tasks(tasks, existing, retry_capped=True)
-    assert {task["task_id"] for task in incomplete} == {tasks[1]["task_id"], tasks[2]["task_id"]}
+    assert {task["task_id"] for task in incomplete} == {
+        tasks[1]["task_id"], tasks[2]["task_id"], tasks[3]["task_id"], tasks[4]["task_id"],
+    }
     assert len(complete) == 1

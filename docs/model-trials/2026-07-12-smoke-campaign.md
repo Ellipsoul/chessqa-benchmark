@@ -191,6 +191,47 @@ Judgement. Our 2026 rates are much higher (kimi-k2.6 24%, minimax-m3 16%, gpt-5.
 12% of the smoke) — today's reasoners think longer against the same 32K budget the paper
 fixed, which is itself a Phase 2 finding. Streaming does not (and should not) change it.
 
+## Slice 2 progress checkpoint (2026-07-12 evening — resume here)
+
+Recovery + first held smokes ran on the streamed harness. Session spend ≈ **$9 by the
+credits meter** (baseline total_used 29.97 → ~38.8; balance ≈ $36). Two NEW transport
+findings and fixes landed mid-campaign:
+
+- **The ~785s duration ceiling (Incident 3).** Distinct from the fixed 340s idle wall:
+  the gateway kills streams at a hard ~785s total duration, and **forges a graceful
+  `[DONE]`** on the way out. First seen as 4 qwen rows cut at exactly 785.1s scoring as
+  silent empty `format_error`s (PR #22 detected terminatorless EOF; insufficient), then
+  6 more passing as fake successes because of the forged terminator (PR #24: completion
+  now requires positive evidence — finish_reason or usage). Consequence: a task is
+  unrunnable if the model cannot emit its full generation inside ~785s at current
+  provider throughput (qwen was decoding at ~16 tok/s that evening vs ~55 in the smoke —
+  time-of-day dependent). Retries land as honest ERROR rows; resume retries them free of
+  charge on the next attempt.
+- **`--retry-capped` (PR #23):** resume no longer re-runs `max_token_reached` rows by
+  default (upstream re-billed every cap on every resume; a deepseek resume re-ran 18
+  caps alongside 1 intended task before the flag landed, and the mid-flight kill of
+  that re-run is why deepseek is 9 rows short below).
+
+State after the checkpoint (all rows verified clean of poison; DB re-ingested):
+
+| run | rows | acc | caps | note |
+|---|---|---|---|---|
+| kimi-k2.6 | 50/50 | 62% | 18 | fully recovered; caps re-ran once pre-flag (+6 new caps) |
+| qwen3.7-max | 44/50 | 72%* | 0 | 6 tasks scrubbed — 785s-ceiling victims, resume re-runs them |
+| deepseek-v4-pro | 41/50 | 56%* | 7 | re-run killed mid-flight at day end; resume runs 9 missing |
+| gemini-3.5-flash | 50/50 | **82%** | 1 | best clean score of the campaign |
+| deepseek-r1 | 50/50 | **24%** | 2 | the paper's model — strikingly low on ChessQA-2026 |
+
+\* accuracy over present rows; final number after the missing rows complete.
+
+**Tomorrow's queue (in order):** (1) deepseek-v4-pro resume (9 tasks), (2) qwen resume
+(6 tasks — if they 785s-fail twice, accept the ERROR rows and document as
+ceiling-victims), (3) held smokes cheapest-first: haiku-4.5-thinking, sonnet-5,
+gpt-5.6-sol, opus-4.8 (replaces 4.6 per PR #23), LAST gemini-3.1-pro-preview; optional
+grok-4.5 re-probe. Use `--no-db` for any parallel launches (long write transactions in
+the record hook still starve concurrent starters — see PR #21 discussion) and ingest
+afterwards. Then the measured tier re-cut in `docs/model-fleet.md` (Aron signs off).
+
 ## The streaming fix (spec for Slice 1)
 
 Change `call_api` in `eval/run_openrouter.py` transport-only; prompts, flags, scoring,

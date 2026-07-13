@@ -1,38 +1,36 @@
 {
   "model": "moonshotai/kimi-k2.6",
-  "accuracy": 0.6,
-  "format_correct_rate": 0.62,
+  "accuracy": 0.62,
+  "format_correct_rate": 0.64,
   "total": 50,
-  "correct": 30,
-  "format_correct": 31,
+  "correct": 31,
+  "format_correct": 32,
   "error_type_stats": {
     "multi_false_items": 1,
-    "correct": 30,
-    "max_token_reached": 12,
-    "format_error": 7
+    "correct": 31,
+    "max_token_reached": 18
   },
   "error_type_rates": {
     "multi_false_items": 0.02,
-    "correct": 0.6,
-    "max_token_reached": 0.24,
-    "format_error": 0.14
+    "correct": 0.62,
+    "max_token_reached": 0.36
   },
-  "time": 2938.7453351020813,
+  "time": 613.9010241031647,
   "usage": {
-    "total_cost": 3.8623116000000004,
-    "total_prompt_tokens": 7267,
-    "total_completion_tokens": 963930,
-    "total_tokens": 971197,
-    "error_count": 5,
-    "extraction_success_count": 31,
-    "extraction_success_rate": 0.62,
-    "avg_cost_per_task": 0.07724623200000001,
-    "avg_tokens_per_task": 19423.94,
-    "cost_per_1k_tokens": 0.003976857012531958,
-    "tokens_per_dollar": 251454.85413450326,
-    "avg_prompt_tokens": 145.34,
-    "avg_completion_tokens": 19278.6,
-    "completion_ratio": 132.6448328058346
+    "total_cost": 4.717323300000002,
+    "total_prompt_tokens": 8336,
+    "total_completion_tokens": 1177432,
+    "total_tokens": 1185768,
+    "error_count": 0,
+    "extraction_success_count": 32,
+    "extraction_success_rate": 0.64,
+    "avg_cost_per_task": 0.09434646600000005,
+    "avg_tokens_per_task": 23715.36,
+    "cost_per_1k_tokens": 0.003978285212621695,
+    "tokens_per_dollar": 251364.58211375918,
+    "avg_prompt_tokens": 166.72,
+    "avg_completion_tokens": 23548.64,
+    "completion_ratio": 141.24664107485606
   },
   "task_type_stats": {
     "motifs_battery": {
@@ -104,13 +102,13 @@
     "position_judgement_neutral": {
       "total": 1,
       "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
+      "cost": 0.13127325,
+      "tokens": 32984,
       "extraction_success": 0,
       "accuracy": 0.0,
       "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "avg_cost": 0.13127325,
+      "avg_tokens": 32984.0
     },
     "position_judgement_advantage": {
       "total": 1,
@@ -137,13 +135,13 @@
     "position_judgement_losing": {
       "total": 1,
       "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
+      "cost": 0.1312734,
+      "tokens": 32980,
       "extraction_success": 0,
       "accuracy": 0.0,
       "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "avg_cost": 0.1312734,
+      "avg_tokens": 32980.0
     },
     "position_judgement_disadvantage": {
       "total": 1,
@@ -258,13 +256,13 @@
     "short_tactics_theme_mateIn2": {
       "total": 1,
       "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
+      "cost": 0.13119645,
+      "tokens": 32899,
       "extraction_success": 0,
       "accuracy": 0.0,
       "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "avg_cost": 0.13119645,
+      "avg_tokens": 32899.0
     },
     "short_tactics_theme_deflection": {
       "total": 1,
@@ -280,24 +278,24 @@
     "short_tactics_theme_doubleCheck": {
       "total": 1,
       "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
+      "cost": 0.1311955,
+      "tokens": 32898,
       "extraction_success": 0,
       "accuracy": 0.0,
       "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "avg_cost": 0.1311955,
+      "avg_tokens": 32898.0
     },
     "short_tactics_theme_fork": {
       "total": 1,
-      "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
-      "extraction_success": 0,
-      "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "correct": 1,
+      "cost": 0.06769095,
+      "tokens": 17015,
+      "extraction_success": 1,
+      "accuracy": 1.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.06769095,
+      "avg_tokens": 17015.0
     },
     "short_tactics_theme_skewer": {
       "total": 1,
@@ -346,13 +344,13 @@
     "short_tactics_theme_xRayAttack": {
       "total": 1,
       "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
+      "cost": 0.1311868,
+      "tokens": 32893,
       "extraction_success": 0,
       "accuracy": 0.0,
       "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "avg_cost": 0.1311868,
+      "avg_tokens": 32893.0
     },
     "short_tactics_theme_advancedPawn": {
       "total": 1,
@@ -401,13 +399,13 @@
     "short_tactics_theme_capturingDefender": {
       "total": 1,
       "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
+      "cost": 0.13119535,
+      "tokens": 32902,
       "extraction_success": 0,
       "accuracy": 0.0,
       "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "avg_cost": 0.13119535,
+      "avg_tokens": 32902.0
     },
     "short_tactics_theme_sacrifice": {
       "total": 1,
@@ -601,13 +599,13 @@
     "Position Judgement": {
       "total": 5,
       "correct": 1,
-      "cost": 0.38813422,
-      "tokens": 97568,
+      "cost": 0.65068087,
+      "tokens": 163532,
       "extraction_success": 1,
       "accuracy": 0.2,
       "extraction_success_rate": 0.2,
-      "avg_cost": 0.077626844,
-      "avg_tokens": 19513.6
+      "avg_cost": 0.130136174,
+      "avg_tokens": 32706.4
     },
     "Semantic": {
       "total": 4,
@@ -622,14 +620,14 @@
     },
     "Short Tactics": {
       "total": 24,
-      "correct": 11,
-      "cost": 1.9397069400000002,
-      "tokens": 486788,
-      "extraction_success": 11,
-      "accuracy": 0.4583333333333333,
-      "extraction_success_rate": 0.4583333333333333,
-      "avg_cost": 0.08082112250000001,
-      "avg_tokens": 20282.833333333332
+      "correct": 12,
+      "cost": 2.53217199,
+      "tokens": 635395,
+      "extraction_success": 12,
+      "accuracy": 0.5,
+      "extraction_success_rate": 0.5,
+      "avg_cost": 0.10550716625,
+      "avg_tokens": 26474.791666666668
     },
     "Structural": {
       "total": 11,

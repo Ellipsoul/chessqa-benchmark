@@ -1,40 +1,40 @@
 {
   "model": "deepseek/deepseek-v4-pro",
-  "accuracy": 0.4,
-  "format_correct_rate": 0.6,
+  "accuracy": 0.5,
+  "format_correct_rate": 0.7,
   "total": 50,
-  "correct": 20,
-  "format_correct": 30,
+  "correct": 25,
+  "format_correct": 35,
   "error_type_stats": {
     "multi_extra_items": 3,
-    "correct": 20,
-    "max_token_reached": 18,
+    "correct": 25,
     "wrong_answer": 7,
-    "format_error": 2
+    "max_token_reached": 14,
+    "format_error": 1
   },
   "error_type_rates": {
     "multi_extra_items": 0.06,
-    "correct": 0.4,
-    "max_token_reached": 0.36,
+    "correct": 0.5,
     "wrong_answer": 0.14,
-    "format_error": 0.04
+    "max_token_reached": 0.28,
+    "format_error": 0.02
   },
-  "time": 1801.852098941803,
+  "time": 2661.650608062744,
   "usage": {
-    "total_cost": 0.788492252,
-    "total_prompt_tokens": 8034,
-    "total_completion_tokens": 903121,
-    "total_tokens": 911155,
-    "error_count": 1,
-    "extraction_success_count": 30,
-    "extraction_success_rate": 0.6,
-    "avg_cost_per_task": 0.015769845039999997,
-    "avg_tokens_per_task": 18223.1,
-    "cost_per_1k_tokens": 0.0008653766395399245,
-    "tokens_per_dollar": 1155566.2058680572,
-    "avg_prompt_tokens": 160.68,
-    "avg_completion_tokens": 18062.42,
-    "completion_ratio": 112.41237241722679
+    "total_cost": 0.7951503910000001,
+    "total_prompt_tokens": 8163,
+    "total_completion_tokens": 910773,
+    "total_tokens": 918936,
+    "error_count": 0,
+    "extraction_success_count": 35,
+    "extraction_success_rate": 0.7,
+    "avg_cost_per_task": 0.015903007820000002,
+    "avg_tokens_per_task": 18378.72,
+    "cost_per_1k_tokens": 0.000865294635317367,
+    "tokens_per_dollar": 1155675.71921121,
+    "avg_prompt_tokens": 163.26,
+    "avg_completion_tokens": 18215.46,
+    "completion_ratio": 111.57331863285557
   },
   "task_type_stats": {
     "motifs_battery": {
@@ -83,14 +83,14 @@
     },
     "motifs_discovered_check": {
       "total": 1,
-      "correct": 0,
-      "cost": 0.028520804,
-      "tokens": 32924,
-      "extraction_success": 0,
-      "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.028520804,
-      "avg_tokens": 32924.0
+      "correct": 1,
+      "cost": 0.024600584,
+      "tokens": 28418,
+      "extraction_success": 1,
+      "accuracy": 1.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.024600584,
+      "avg_tokens": 28418.0
     },
     "motifs_double_check": {
       "total": 1,
@@ -204,14 +204,14 @@
     },
     "short_tactics_rating_beginner": {
       "total": 1,
-      "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
-      "extraction_success": 0,
-      "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "correct": 1,
+      "cost": 0.020706029,
+      "tokens": 23928,
+      "extraction_success": 1,
+      "accuracy": 1.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.020706029,
+      "avg_tokens": 23928.0
     },
     "short_tactics_rating_intermediate": {
       "total": 1,
@@ -270,14 +270,14 @@
     },
     "short_tactics_theme_deflection": {
       "total": 1,
-      "correct": 0,
-      "cost": 0.028558185,
-      "tokens": 32883,
-      "extraction_success": 0,
-      "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.028558185,
-      "avg_tokens": 32883.0
+      "correct": 1,
+      "cost": 0.025270455,
+      "tokens": 29104,
+      "extraction_success": 1,
+      "accuracy": 1.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.025270455,
+      "avg_tokens": 29104.0
     },
     "short_tactics_theme_doubleCheck": {
       "total": 1,
@@ -292,14 +292,14 @@
     },
     "short_tactics_theme_fork": {
       "total": 1,
-      "correct": 0,
-      "cost": 0.02855862,
-      "tokens": 32884,
-      "extraction_success": 0,
-      "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.02855862,
-      "avg_tokens": 32884.0
+      "correct": 1,
+      "cost": 0.0259347,
+      "tokens": 29868,
+      "extraction_success": 1,
+      "accuracy": 1.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.0259347,
+      "avg_tokens": 29868.0
     },
     "short_tactics_theme_skewer": {
       "total": 1,
@@ -402,14 +402,14 @@
     },
     "short_tactics_theme_capturingDefender": {
       "total": 1,
-      "correct": 0,
-      "cost": 0.028509494,
-      "tokens": 32898,
-      "extraction_success": 0,
-      "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.028509494,
-      "avg_tokens": 32898.0
+      "correct": 1,
+      "cost": 0.024292604,
+      "tokens": 28051,
+      "extraction_success": 1,
+      "accuracy": 1.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.024292604,
+      "avg_tokens": 28051.0
     },
     "short_tactics_theme_sacrifice": {
       "total": 1,
@@ -436,13 +436,13 @@
     "short_tactics_theme_trappedPiece": {
       "total": 1,
       "correct": 0,
-      "cost": 0.028508624,
-      "tokens": 32897,
+      "cost": 0.028509494,
+      "tokens": 32898,
       "extraction_success": 0,
       "accuracy": 0.0,
       "extraction_success_rate": 0.0,
-      "avg_cost": 0.028508624,
-      "avg_tokens": 32897.0
+      "avg_cost": 0.028509494,
+      "avg_tokens": 32898.0
     },
     "short_tactics_theme_zugzwang": {
       "total": 1,
@@ -591,14 +591,14 @@
   "task_category_stats": {
     "Motifs": {
       "total": 6,
-      "correct": 3,
-      "cost": 0.081218502,
-      "tokens": 94059,
-      "extraction_success": 5,
-      "accuracy": 0.5,
-      "extraction_success_rate": 0.8333333333333334,
-      "avg_cost": 0.013536417,
-      "avg_tokens": 15676.5
+      "correct": 4,
+      "cost": 0.077298282,
+      "tokens": 89553,
+      "extraction_success": 6,
+      "accuracy": 0.6666666666666666,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.012883047,
+      "avg_tokens": 14925.5
     },
     "Position Judgement": {
       "total": 5,
@@ -624,14 +624,14 @@
     },
     "Short Tactics": {
       "total": 24,
-      "correct": 4,
-      "cost": 0.543490015,
-      "tokens": 626419,
-      "extraction_success": 6,
-      "accuracy": 0.16666666666666666,
-      "extraction_success_rate": 0.25,
-      "avg_cost": 0.022645417291666668,
-      "avg_tokens": 26100.791666666668
+      "correct": 8,
+      "cost": 0.5540683740000001,
+      "tokens": 638706,
+      "extraction_success": 10,
+      "accuracy": 0.3333333333333333,
+      "extraction_success_rate": 0.4166666666666667,
+      "avg_cost": 0.023086182250000004,
+      "avg_tokens": 26612.75
     },
     "Structural": {
       "total": 11,
@@ -650,7 +650,7 @@
     "n_samples_per_task": 1,
     "max_tasks": null,
     "add_context": false,
-    "workers": 8,
+    "workers": 4,
     "format_example_group": 1,
     "enable_thinking": true,
     "backend": "vercel-gateway",

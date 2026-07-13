@@ -228,9 +228,11 @@ State after the checkpoint (all rows verified clean of poison; DB re-ingested):
 (6 tasks — if they 785s-fail twice, accept the ERROR rows and document as
 ceiling-victims), (3) held smokes cheapest-first: haiku-4.5-thinking, sonnet-5,
 gpt-5.6-sol, opus-4.8 (replaces 4.6 per PR #23), LAST gemini-3.1-pro-preview; optional
-grok-4.5 re-probe. Use `--no-db` for any parallel launches (long write transactions in
-the record hook still starve concurrent starters — see PR #21 discussion) and ingest
-afterwards. Then the measured tier re-cut in `docs/model-fleet.md` (Aron signs off).
+grok-4.5 re-probe. Parallel launches no longer need `--no-db`: the record hook now
+commits one short transaction per row instead of batching (the batched design held the
+single WAL writer slot across the minutes between completions, starving concurrent
+starters — the root cause behind the PR #21 symptom). `--no-db` + ingest remains a safe
+fallback. Then the measured tier re-cut in `docs/model-fleet.md` (Aron signs off).
 
 ## The streaming fix (spec for Slice 1)
 

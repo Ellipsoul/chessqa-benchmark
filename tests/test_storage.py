@@ -195,8 +195,8 @@ def _minimal_row(task_id: str) -> dict:
 
 
 def test_connect_sets_generous_busy_timeout(conn):
-    # Concurrent runs share one DB, and the runner's record hook batches commits, so a
-    # sibling process can hold the write lock far longer than sqlite3's 5s default.
+    # Concurrent runs share one DB; even with per-row hook commits, ingest/final-sync
+    # batches can hold the writer slot longer than sqlite3's 5s default.
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
 
@@ -239,7 +239,7 @@ def test_record_hook_survives_locked_db(tmp_path, capsys):
     run_id = storage.get_or_create_run(hook_conn, "lock-test", {"model": "m"})
     hook_conn.execute("PRAGMA busy_timeout = 100")  # don't wait 30s in the test
 
-    hook = run_openrouter.make_db_record_hook(hook_conn, run_id, save_interval=1)
+    hook = run_openrouter.make_db_record_hook(hook_conn, run_id)
 
     blocker = storage.connect(db_path)
     blocker.execute("BEGIN IMMEDIATE")  # hold the write lock like a sibling run would
@@ -250,13 +250,40 @@ def test_record_hook_survives_locked_db(tmp_path, capsys):
         blocker.close()
     stderr = capsys.readouterr().err
     assert "WARNING" in stderr and "blocked_task" in stderr
+    # The failed upsert must not leave a dangling write transaction holding the lock.
+    assert not hook_conn.in_transaction
 
-    # Connection stays usable once the lock clears; later rows still land.
+    # Connection stays usable once the lock clears; later rows still land (and commit).
     hook(_minimal_row("later_task"))
-    hook_conn.commit()
     rows = hook_conn.execute("SELECT task_id FROM results").fetchall()
     assert [row["task_id"] for row in rows] == ["later_task"]
     hook_conn.close()
+
+
+def test_record_hook_releases_writer_slot_per_row(tmp_path):
+    """The WAL-starvation regression (observed 2026-07-12): the hook used to batch
+    commits, leaving its write transaction open across the minutes between task
+    completions and starving every sibling process. After each recorded row, another
+    connection must be able to take the writer slot IMMEDIATELY (busy_timeout=0)."""
+    import run_openrouter
+
+    db_path = tmp_path / "shared.sqlite3"
+    hook_conn = storage.connect(db_path)
+    run_id = storage.get_or_create_run(hook_conn, "starve-test", {"model": "m"})
+    hook = run_openrouter.make_db_record_hook(hook_conn, run_id)
+
+    sibling = sqlite3.connect(str(db_path))
+    sibling.execute("PRAGMA busy_timeout = 0")  # any held writer slot fails instantly
+    try:
+        for row_index in range(3):
+            hook(_minimal_row(f"row_{row_index}"))
+            assert not hook_conn.in_transaction, "hook must commit per row"
+            # Would raise 'database is locked' under the old batched-commit design
+            sibling.execute("BEGIN IMMEDIATE")
+            sibling.rollback()
+    finally:
+        sibling.close()
+        hook_conn.close()
 
 
 def test_live_row_with_attempts_roundtrip(conn):

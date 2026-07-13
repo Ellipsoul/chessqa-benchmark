@@ -1452,23 +1452,30 @@ def setup_results_db(args, tasks: list[dict[str, Any]]):
     return conn, run_id
 
 
-def make_db_record_hook(conn: sqlite3.Connection, run_id: int, save_interval: int):
-    """Build the per-result SQLite mirror hook (batched commits every save_interval rows).
+def make_db_record_hook(conn: sqlite3.Connection, run_id: int):
+    """Build the per-result SQLite mirror hook (one short transaction per row).
 
-    Non-fatal by contract: the JSONL is canonical and the DB is a rebuildable index, so a
-    locked database (e.g. a sibling run holding the write lock past busy_timeout) must
-    never kill a paid inference run — warn and move on.
+    Commits immediately after every row. WAL allows exactly ONE writer at a time, and
+    the previous batched-commit design (every save_interval rows) left the implicit
+    write transaction open across the minutes-long idle gaps between task completions —
+    starving every other runner process on the same DB (observed 2026-07-12: concurrent
+    startups exhausted their jittered lock retries against a hook connection that was
+    just *waiting* for its next task). Per-row commits hold the writer lock for
+    milliseconds, and mirror volume is at most completions-per-second, so batching
+    bought nothing.
+
+    Non-fatal by contract: the JSONL is canonical and the DB is a rebuildable index, so
+    a locked database must never kill a paid inference run — roll back (a failed upsert
+    must not leave a dangling write transaction holding the lock), warn, and move on.
     """
-    recorded_count = 0
 
     def record_to_db(result: dict[str, Any]) -> None:
-        nonlocal recorded_count
         try:
             storage.upsert_result(conn, run_id, result)
-            recorded_count += 1
-            if recorded_count % save_interval == 0:
-                conn.commit()
+            conn.commit()
         except sqlite3.OperationalError as exc:
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
             print(
                 f"WARNING: SQLite mirror skipped task {result.get('task_id')}: {exc}. "
                 "The row is safe in the results JSONL; rebuild the DB with "
@@ -1619,7 +1626,7 @@ def main():
 
             record_hook = None
             if conn is not None:
-                record_hook = make_db_record_hook(conn, run_id, args.save_interval)
+                record_hook = make_db_record_hook(conn, run_id)
 
             try:
                 new_results = inferencer.run_inference(
@@ -1806,8 +1813,12 @@ def main():
     # Non-fatal: JSONL + stats are already on disk; the DB can always be rebuilt.
     if conn is not None:
         try:
-            for result in results:
+            for result_number, result in enumerate(results, 1):
                 storage.upsert_result(conn, run_id, result)
+                # Bound how long the single WAL writer slot is held: a full-run sync is
+                # thousands of rows, and sibling runner processes write on completions.
+                if result_number % 200 == 0:
+                    conn.commit()
             storage.finalize_run(conn, run_id, stats_payload, status="complete")
         except sqlite3.OperationalError as exc:
             print(

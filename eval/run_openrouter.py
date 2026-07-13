@@ -22,11 +22,12 @@ End-to-end flow:
    ``--use-format-example-group``.
 4. Fan out over a ``ThreadPoolExecutor`` (``--workers``) paced by a shared rate limiter
    (``--rps``/``--burst``; see eval/throttle.py for the retry/backoff policy); each worker
-   POSTs to the selected backend's chat completions API as a STREAMING (SSE) request —
-   reassembled by ``consume_chat_sse`` into the non-streaming message shape — so long
-   generations keep bytes moving and survive the gateway's ~340s wire-idle kill (Incident 2,
-   docs/model-trials/2026-07-12-smoke-campaign.md; the Anthropic-native /v1/messages path
-   for adaptive-thinking models remains non-streaming). Every attempt is recorded, with
+   POSTs to the selected backend as a STREAMING (SSE) request — reassembled by
+   ``consume_chat_sse`` (chat completions) or ``consume_anthropic_sse`` (the
+   Anthropic-native /v1/messages path for adaptive-thinking models) into the
+   non-streaming message shape — so long generations keep bytes moving and survive the
+   gateway's ~340s wire-idle kill (Incident 2,
+   docs/model-trials/2026-07-12-smoke-campaign.md). Every attempt is recorded, with
    ``ttft_ms`` and partial stream counters; thinking traces come from the reassembled
    ``reasoning``/``reasoning_details`` fields, tagged with a ``thinking_source`` fidelity
    label (full_text / summary / encrypted_only / ...) per task. A monitor thread shows
@@ -502,6 +503,120 @@ def consume_chat_sse(
     return result, stream_info()
 
 
+def consume_anthropic_sse(
+    response: requests.Response, started_at_monotonic: float, on_delta=None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Drain a streamed Anthropic-native /v1/messages response into the non-streaming shape.
+
+    The native endpoint has its own SSE grammar — typed events instead of the chat path's
+    uniform chunks: ``message_start`` (message skeleton + input usage),
+    ``content_block_start``/``content_block_delta`` (``thinking_delta`` / ``text_delta`` /
+    ``signature_delta`` fragments per indexed block), ``message_delta`` (stop_reason +
+    output usage), ``message_stop``, plus ``ping`` keepalives and ``error`` events.
+    The reassembled dict matches what ``parse_native_anthropic_message`` already parses.
+
+    Streaming this path became necessary on 2026-07-13: adaptive-thinking Claude models
+    were assumed to answer quickly (probe-verified on short prompts), but on hard chess
+    tasks with a 32K budget sonnet-5 generates for 380-400s — past the gateway's ~340s
+    idle wall for NON-streaming requests. Each wall kill was billed upstream (a 200 on
+    the gateway dashboard) while the client saw a connection error and re-requested:
+    70+ billed calls for a 49-task smoke.
+
+    Completion requires positive evidence — a ``message_stop`` event or a ``stop_reason``
+    — mirroring the chat path's forged-terminator defense. Transport failures and
+    in-stream error events raise StreamDrop with partial counters.
+    """
+    message: dict[str, Any] = {}
+    blocks: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] = {}
+    stop_reason = None
+    saw_message_stop = False
+    data_events = 0
+    delta_events = 0
+    first_token_ms: int | None = None
+
+    def stream_info() -> dict[str, Any]:
+        return {
+            "ttft_ms": first_token_ms,
+            "stream_chunks": delta_events,
+            "content_chars": sum(len(block.get("text") or "") for block in blocks.values()),
+            "reasoning_chars": sum(len(block.get("thinking") or "") for block in blocks.values()),
+            "saw_done": saw_message_stop,
+        }
+
+    try:
+        for raw_line in response.iter_lines():
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
+            if line.startswith(":") or not line.startswith("data:"):
+                continue  # comments and "event: <type>" lines; the type is repeated in the data
+            chunk = json.loads(line[len("data:") :].strip())
+            data_events += 1
+            chunk_type = chunk.get("type")
+            if chunk_type == "error" or chunk.get("error"):
+                raise StreamDrop(
+                    RuntimeError(f"in-stream error event: {json.dumps(chunk.get('error') or chunk)[:300]}"),
+                    stream_info(),
+                )
+            if chunk_type == "ping":
+                continue
+            if chunk_type == "message_start":
+                start = chunk.get("message") or {}
+                message = {key: start[key] for key in ("id", "model", "role") if start.get(key) is not None}
+                usage.update(start.get("usage") or {})
+            elif chunk_type == "content_block_start":
+                blocks[chunk.get("index", 0)] = dict(chunk.get("content_block") or {})
+            elif chunk_type == "content_block_delta":
+                block = blocks.setdefault(chunk.get("index", 0), {})
+                delta = chunk.get("delta") or {}
+                delta_type = delta.get("type")
+                got_tokens = False
+                if delta_type == "thinking_delta" and delta.get("thinking"):
+                    block.setdefault("type", "thinking")
+                    block["thinking"] = (block.get("thinking") or "") + delta["thinking"]
+                    got_tokens = True
+                elif delta_type == "text_delta" and delta.get("text"):
+                    block.setdefault("type", "text")
+                    block["text"] = (block.get("text") or "") + delta["text"]
+                    got_tokens = True
+                elif delta_type == "signature_delta" and delta.get("signature"):
+                    block["signature"] = (block.get("signature") or "") + delta["signature"]
+                if got_tokens:
+                    delta_events += 1
+                    if first_token_ms is None:
+                        first_token_ms = int((time.monotonic() - started_at_monotonic) * 1000)
+                    if on_delta is not None:
+                        on_delta()
+            elif chunk_type == "message_delta":
+                if (chunk.get("delta") or {}).get("stop_reason"):
+                    stop_reason = chunk["delta"]["stop_reason"]
+                usage.update(chunk.get("usage") or {})
+            elif chunk_type == "message_stop":
+                saw_message_stop = True
+                break
+    except StreamDrop:
+        raise
+    except Exception as stream_error:
+        raise StreamDrop(stream_error, stream_info()) from stream_error
+
+    if data_events == 0:
+        raise ValueError("2xx native response produced no SSE data events (streaming not honored?)")
+    if not saw_message_stop and stop_reason is None:
+        raise StreamDrop(
+            RuntimeError("native SSE stream ended without message_stop or stop_reason — truncated upstream"),
+            stream_info(),
+        )
+
+    result = dict(message)
+    result["content"] = [blocks[index] for index in sorted(blocks)]
+    if stop_reason is not None:
+        result["stop_reason"] = stop_reason
+    if usage:
+        result["usage"] = usage
+    return result, stream_info()
+
+
 class RunProgress:
     """Thread-safe live counters behind the tqdm postfix (forward progress + burn rate).
 
@@ -949,15 +1064,14 @@ class OpenrouterInferencer:
         """POST one chat completion with rate limiting and classified, logged retries.
 
         Request notes:
-        - Chat-completions requests are STREAMED (``stream: true`` +
-          ``stream_options.include_usage``) and reassembled by ``consume_chat_sse`` into
-          the exact non-streaming message shape. This defeats the Vercel AI Gateway's
-          ~340s wire-idle kill on long generations (Incident 2 in
-          docs/model-trials/2026-07-12-smoke-campaign.md). The Anthropic-native
-          /v1/messages path stays NON-streaming for now: adaptive runs return short
-          summarized traces, never hit the wall, and use a different SSE grammar
-          (message_start / content_block_delta / message_delta) — revisit only if a
-          native run ever stalls at ~340s.
+        - EVERY request is STREAMED and reassembled into the exact non-streaming message
+          shape: chat completions via ``consume_chat_sse`` (``stream: true`` +
+          ``stream_options.include_usage``), the Anthropic-native /v1/messages path via
+          ``consume_anthropic_sse`` (its own typed-event SSE grammar). Streaming defeats
+          the Vercel AI Gateway's ~340s wire-idle kill on long generations (Incident 2 in
+          docs/model-trials/2026-07-12-smoke-campaign.md; the native path joined on
+          2026-07-13 after adaptive sonnet-5 chess generations ran 380-400s and burned
+          billed wall-kill corpses).
         - ``--enable-thinking`` maps to ``build_reasoning_payload`` (probe-verified; see
           its docstring for the Claude 5 adaptive-thinking limitation).
         - OpenRouter-only fields: ``usage: {include: true}`` (per-call cost accounting)
@@ -1003,11 +1117,14 @@ class OpenrouterInferencer:
             else:
                 data["reasoning"] = build_reasoning_payload(self.model, self.backend)
 
-        # The 340s-wall fix: stream every chat-completions request so bytes move on the
-        # wire continuously. The native path stays non-streaming (see call_model docstring).
-        use_streaming = not use_native_anthropic
-        if use_streaming:
-            data["stream"] = True
+        # The 340s-wall fix: stream EVERY request so bytes move on the wire continuously.
+        # The native path streamed too as of 2026-07-13 — adaptive sonnet-5 generations
+        # ran 380-400s on hard chess tasks and died at the wall, each kill billed
+        # upstream (see consume_anthropic_sse docstring). stream_options is an
+        # OpenAI-compatible extension; the native endpoint takes bare "stream": true.
+        use_streaming = True
+        data["stream"] = True
+        if not use_native_anthropic:
             data["stream_options"] = {"include_usage": True}
 
         if self.backend == "openrouter":
@@ -1066,7 +1183,11 @@ class OpenrouterInferencer:
             if response is not None and 200 <= response.status_code < 300:
                 try:
                     if use_native_anthropic:
-                        result = response.json()
+                        result, stream_info = consume_anthropic_sse(
+                            response,
+                            attempt_start,
+                            on_delta=progress.on_stream_delta if progress is not None else None,
+                        )
                         content, thinking_content, thinking_source, usage = parse_native_anthropic_message(result)
                         # Preserve the full native message (thinking blocks + signatures).
                         message = {

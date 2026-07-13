@@ -9,19 +9,19 @@ treat it as the single source of truth for *which* models we run and *how each m
 called*.
 
 Status (2026-07-12): **smoke campaign half done, paused on a transport defect.** 7 of 14
-smokes completed clean, 3 completed with ERROR rows, 7 held — the gateway kills
-non-streaming requests at ~340s and bills the killed attempts, so the remaining (mostly
-expensive) smokes wait for a streaming fix in `eval/run_openrouter.py`. Full results,
-incident analysis, and the exact resume playbook:
-**`docs/model-trials/2026-07-12-smoke-campaign.md`** — read it before running anything.
-Headline measured full-run projections (replacing the x1..x6 bands where measured):
-grok-4.3 $19, llama-4-maverick $4, haiku-4.5 non-thinking $15 (anchor reproduced),
-minimax-m3 $60, gpt-5.4-mini $128 (×4.6 over x1!), and lower bounds deepseek-v4-pro
-≥$21, qwen3.7-max ≥$93, kimi-k2.6 ≥$272. Every measurement fell inside its old band, but
-x1 was systematically optimistic (true multipliers ×1.3–×4.6) — the measured Tier-1 sum
-is **≥$325 vs the $126 x1 estimate**. Tier re-cut deferred until the held smokes are
-measured post-fix. Smokes that must NOT be re-run: haiku-4.5 non-thinking, sonnet-5
-verbose-cot, grok-4.3, llama-4-maverick, gpt-5.4-mini, minimax-m3.
+smokes completed clean, 3 completed with ERROR rows, 7 held — superseded, see below.
+
+Status (2026-07-13): **smoke campaign COMPLETE — every fleet config measured** (grok-4.5
+still 503 upstream; grok-4.3 stands in). The x1..x6 bands are retired: full-run costs are
+now ±20% measurements. Full results table, accuracy leaderboard, and incident history:
+**`docs/model-trials/2026-07-12-smoke-campaign.md`** ("Campaign complete — final
+results"). Measured full-run projections ($): deepseek-v4-pro **46**, minimax-m3 60,
+grok-4.3 19, llama-4-maverick 4, gpt-5.4-mini 128, qwen3.7-max 139, haiku-4.5-thinking
+135, haiku-4.5 non-thinking 15, deepseek-r1 175, sonnet-5 295, kimi-k2.6 313,
+gemini-3.5-flash 319, gpt-5.6-sol 324, gemini-3.1-pro-preview 457 (**90% accuracy — the
+board leader**), opus-4.8 615. Old Tier 1 sums to ~$396 (vs $126 x1); old Tier 2 to
+~$2,633. **Tier re-cut pending Aron's sign-off** with these numbers. No smoke may be
+re-run — all results files are complete and canonical.
 
 ## Cost model (how every estimate below was computed)
 

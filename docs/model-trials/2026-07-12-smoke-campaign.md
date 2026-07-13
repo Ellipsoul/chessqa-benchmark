@@ -1,10 +1,14 @@
 # 2026-07-12 fleet smoke campaign — partial results, the 340s wall, and the resume playbook
 
-Status: **paused by design, not failure.** 7 of 14 planned 50-task smokes completed clean,
-3 completed with casualties from a newly-discovered transport defect (the "340s wall"),
-7 held until a streaming fix lands. Session spend ≈ **$21** against a $38 cap (~$10.7 of
-it burned by the defect). Aron approved pausing and deferring the fix to a dedicated
-session (2026-07-12).
+Status: **CAMPAIGN COMPLETE (2026-07-13).** All 14 planned configs measured (grok-4.5
+still 503 upstream; grok-4.3 stands in). Final results and the measured tier-re-cut
+inputs: see "Campaign complete — final results" at the end of this doc. Total campaign
+spend ≈ **$55 by the credits meter** across both days, of which ~$17 went to three
+sequentially-discovered transport defects (the 340s idle wall on both endpoint paths,
+and the ~785s duration ceiling) — all fixed (PRs #20, #22, #24, #28).
+
+Historical context below (2026-07-12): 7 of 14 smokes clean, 3 damaged by the 340s wall,
+7 held for the streaming fix; ~$21 of the $38 session cap spent.
 
 **Read this before touching the smoke campaign.** Companion docs:
 `docs/model-fleet.md` (fleet + measured projections), `docs/cost-baseline-2026-07-06.md`
@@ -259,3 +263,51 @@ filenames unchanged, so results remain comparable and resume just works.
 
 Slice 1 acceptance: parity + kill-shot green, `ruff` + pytest green, PR merged. Campaign
 runs (recovering the 37 ERROR rows, the held seven) belong to Slice 2 — playbook above.
+
+## Campaign complete — final results (2026-07-13)
+
+All thinking smokes: n=50 (seed-42, 1 task/type), `--enable-thinking --max-tokens 32768`.
+Full-run projections from `eval/smoke_analysis.py` (±20%; native-Anthropic smokes priced
+from tokens x list). Non-thinking baselines from the 2026-07-12 table remain valid.
+
+| model | acc | caps | thinking_source | smoke $ | projected full-run $ |
+|---|---|---|---|---|---|
+| google/gemini-3.1-pro-preview | **90%** | 1 | full_text ×50 | 7.20 | 457 |
+| google/gemini-3.5-flash | 82% | 1 | full_text ×50 | 4.27 | 319 |
+| openai/gpt-5.6-sol | 80% | 0 | plain ×36 / summary ×11 | 5.60 | 324 |
+| alibaba/qwen3.7-max | 76% | 2 | full_text ×49 | 2.10* | 139 |
+| anthropic/claude-sonnet-5 | 68% | 3 | summary ×50 | 5.36 | 295 |
+| anthropic/claude-opus-4.8 | 68% | 5 | summary ×50 | 11.77 | 615 |
+| moonshotai/kimi-k2.6 | 62% | 18 | full_text ×50 | 4.72 | 313 |
+| deepseek/deepseek-v4-pro | 50% | 14 | full_text ×50 | 0.80 | **46** |
+| anthropic/claude-haiku-4.5 (thinking) | 42% | 0 | full_text ×50 | 1.94 | 135 |
+| deepseek/deepseek-r1 | 24% | 2 | full_text ×50 | 2.52 | 175 |
+
+\* qwen smoke $ excludes billed casualties of the transport defects; 1 task
+(short_tactics_theme_defensiveMove_0024) is a permanent 785s-ceiling ERROR row —
+unrunnable at 32K at observed provider throughput; free to retry on any future resume.
+
+Headlines:
+- **gemini-3.1-pro-preview 90%** — 10.7pp above the paper's best (GPT-5-thinking 79.3%),
+  and it is full_text: the Phase 3 anchor candidate if funded.
+- **deepseek-r1 24%**: the paper's own model scores near the bottom on ChessQA-2026
+  conditions — reproduce-vs-update contrast worth a paragraph in the writeup.
+- **sonnet-5 thinking 68% == its non-thinking verbose-cot 68%**; haiku-4.5 gains
+  +28pp from thinking (14%→42%). Adaptive thinking helps small models far more here.
+- **Cap rates are a model property**: kimi 36%, deepseek-v4-pro 28% vs gemini/gpt ≤2%
+  at identical budgets — the "thinks past its budget" failure mode is concentrated in
+  open-weight reasoners, and those capped rows all have empty responses (the model
+  never surfaces an answer).
+- Trace fidelity exactly as the fleet doc predicted; gpt-5.6-sol emitted `plain`
+  (flat reasoning string) on 36/50 — treat per-result, as documented.
+
+Day-2 transport incidents (both fixed same-day): the native /v1/messages path hit the
+340s idle wall exactly as chat completions had (sonnet-5: 70+ billed calls for 49 tasks;
+fixed by PR #28 streaming the native SSE grammar), and resume re-billed empty-response
+capped rows (fixed by PR #27). The gpt-5.6-sol smoke's 8 extra requests were ordinary
+provider-side stream drops, correctly retried under the billed-risk cap (~$0.05).
+
+Measured tier totals for the re-cut (Aron signs off): old Tier 1 sums to ~$396
+(deepseek-v4-pro 46 + minimax 60 + qwen 139 + gpt-5.4-mini 128 + grok-4.3 19 + llama 4);
+old Tier 2 (with opus-4.8 swapped in) sums to ~$2,633. Both tiers ≈ $3,030 (x1-x6 bands
+are retired — these are ±20% measurements).

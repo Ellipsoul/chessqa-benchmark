@@ -30,6 +30,8 @@ PRICES = {
     "moonshotai/kimi-k2.6": (0.95, 4.00),
     "openai/gpt-5.6-sol": (5.00, 30.00),
     "anthropic/claude-opus-4.6": (5.00, 25.00),
+    # Same list price as opus-4.6 (verified by Aron 2026-07-13; the PR #23 tier swap)
+    "anthropic/claude-opus-4.8": (5.00, 25.00),
     "anthropic/claude-sonnet-5": (2.00, 10.00),
     "anthropic/claude-haiku-4.5": (1.00, 5.00),
     "google/gemini-3.5-flash": (1.50, 9.00),

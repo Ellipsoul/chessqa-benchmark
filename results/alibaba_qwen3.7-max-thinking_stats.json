@@ -1,36 +1,36 @@
 {
   "model": "alibaba/qwen3.7-max",
-  "accuracy": 0.66,
-  "format_correct_rate": 0.8,
+  "accuracy": 0.72,
+  "format_correct_rate": 0.88,
   "total": 50,
-  "correct": 33,
-  "format_correct": 40,
+  "correct": 36,
+  "format_correct": 44,
   "error_type_stats": {
-    "correct": 33,
-    "format_error": 10,
-    "wrong_answer": 7
+    "correct": 36,
+    "format_error": 6,
+    "wrong_answer": 8
   },
   "error_type_rates": {
-    "correct": 0.66,
-    "format_error": 0.2,
-    "wrong_answer": 0.14
+    "correct": 0.72,
+    "format_error": 0.12,
+    "wrong_answer": 0.16
   },
-  "time": 3509.9540932178497,
+  "time": 1570.2451572418213,
   "usage": {
-    "total_cost": 1.3025312499999997,
-    "total_prompt_tokens": 7226,
-    "total_completion_tokens": 344933,
-    "total_tokens": 352159,
-    "error_count": 10,
-    "extraction_success_count": 40,
-    "extraction_success_rate": 0.8,
-    "avg_cost_per_task": 0.026050624999999994,
-    "avg_tokens_per_task": 7043.18,
-    "cost_per_1k_tokens": 0.0036987021487453102,
-    "tokens_per_dollar": 270365.1064033973,
-    "avg_prompt_tokens": 144.52,
-    "avg_completion_tokens": 6898.66,
-    "completion_ratio": 47.73498477719347
+    "total_cost": 1.5828475,
+    "total_prompt_tokens": 7871,
+    "total_completion_tokens": 419469,
+    "total_tokens": 427340,
+    "error_count": 6,
+    "extraction_success_count": 44,
+    "extraction_success_rate": 0.88,
+    "avg_cost_per_task": 0.031656949999999996,
+    "avg_tokens_per_task": 8546.8,
+    "cost_per_1k_tokens": 0.003703953526466046,
+    "tokens_per_dollar": 269981.7891489862,
+    "avg_prompt_tokens": 157.42,
+    "avg_completion_tokens": 8389.38,
+    "completion_ratio": 53.29297420912209
   },
   "task_type_stats": {
     "motifs_battery": {
@@ -135,13 +135,13 @@
     "position_judgement_losing": {
       "total": 1,
       "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
-      "extraction_success": 0,
+      "cost": 0.038235,
+      "tokens": 10350,
+      "extraction_success": 1,
       "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.038235,
+      "avg_tokens": 10350.0
     },
     "position_judgement_disadvantage": {
       "total": 1,
@@ -233,14 +233,14 @@
     },
     "short_tactics_rating_expert": {
       "total": 1,
-      "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
-      "extraction_success": 0,
-      "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "correct": 1,
+      "cost": 0.10826,
+      "tokens": 28966,
+      "extraction_success": 1,
+      "accuracy": 1.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.10826,
+      "avg_tokens": 28966.0
     },
     "short_tactics_theme_pin": {
       "total": 1,
@@ -299,14 +299,14 @@
     },
     "short_tactics_theme_skewer": {
       "total": 1,
-      "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
-      "extraction_success": 0,
-      "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "correct": 1,
+      "cost": 0.05519875,
+      "tokens": 14805,
+      "extraction_success": 1,
+      "accuracy": 1.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.05519875,
+      "avg_tokens": 14805.0
     },
     "short_tactics_theme_defensiveMove": {
       "total": 1,
@@ -398,14 +398,14 @@
     },
     "short_tactics_theme_capturingDefender": {
       "total": 1,
-      "correct": 0,
-      "cost": 0.0,
-      "tokens": 0,
-      "extraction_success": 0,
-      "accuracy": 0.0,
-      "extraction_success_rate": 0.0,
-      "avg_cost": 0.0,
-      "avg_tokens": 0.0
+      "correct": 1,
+      "cost": 0.0786225,
+      "tokens": 21060,
+      "extraction_success": 1,
+      "accuracy": 1.0,
+      "extraction_success_rate": 1.0,
+      "avg_cost": 0.0786225,
+      "avg_tokens": 21060.0
     },
     "short_tactics_theme_sacrifice": {
       "total": 1,
@@ -599,13 +599,13 @@
     "Position Judgement": {
       "total": 5,
       "correct": 2,
-      "cost": 0.13514500000000002,
-      "tokens": 36512,
-      "extraction_success": 3,
+      "cost": 0.17337999999999998,
+      "tokens": 46862,
+      "extraction_success": 4,
       "accuracy": 0.4,
-      "extraction_success_rate": 0.6,
-      "avg_cost": 0.027029000000000004,
-      "avg_tokens": 7302.4
+      "extraction_success_rate": 0.8,
+      "avg_cost": 0.034676,
+      "avg_tokens": 9372.4
     },
     "Semantic": {
       "total": 4,
@@ -620,14 +620,14 @@
     },
     "Short Tactics": {
       "total": 24,
-      "correct": 12,
-      "cost": 0.5596924999999999,
-      "tokens": 150666,
-      "extraction_success": 16,
-      "accuracy": 0.5,
-      "extraction_success_rate": 0.6666666666666666,
-      "avg_cost": 0.02332052083333333,
-      "avg_tokens": 6277.75
+      "correct": 15,
+      "cost": 0.80177375,
+      "tokens": 215497,
+      "extraction_success": 19,
+      "accuracy": 0.625,
+      "extraction_success_rate": 0.7916666666666666,
+      "avg_cost": 0.03340723958333333,
+      "avg_tokens": 8979.041666666666
     },
     "Structural": {
       "total": 11,
@@ -646,7 +646,7 @@
     "n_samples_per_task": 1,
     "max_tasks": null,
     "add_context": false,
-    "workers": 8,
+    "workers": 4,
     "format_example_group": 1,
     "enable_thinking": true,
     "backend": "vercel-gateway",

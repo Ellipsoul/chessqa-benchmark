@@ -391,12 +391,75 @@ def native_body(thinking_text="Summarized reasoning about the position.", includ
     }
 
 
+def native_sse_lines(body, piece_len=6):
+    """Chop a stored non-streamed /v1/messages body into its SSE event lines (the native
+    parity fixture): message_start, per-block start/delta/stop with thinking_delta /
+    text_delta / signature_delta fragments, message_delta carrying stop_reason + output
+    usage, message_stop, plus a ping for grammar coverage."""
+
+    def event(name, payload):
+        return [f"event: {name}".encode(), ("data: " + json.dumps(payload)).encode()]
+
+    usage = body.get("usage", {})
+    lines = event(
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {
+                **{key: body[key] for key in ("id", "model", "role") if key in body},
+                "content": [],
+                "usage": {"input_tokens": usage.get("input_tokens", 0), "output_tokens": 1},
+            },
+        },
+    )
+    lines += event("ping", {"type": "ping"})
+    for index, block in enumerate(body["content"]):
+        if block["type"] == "thinking":
+            lines += event(
+                "content_block_start",
+                {"type": "content_block_start", "index": index, "content_block": {"type": "thinking", "thinking": ""}},
+            )
+            text = block.get("thinking") or ""
+            for start in range(0, len(text), piece_len):
+                lines += event(
+                    "content_block_delta",
+                    {"type": "content_block_delta", "index": index,
+                     "delta": {"type": "thinking_delta", "thinking": text[start : start + piece_len]}},
+                )
+            if block.get("signature"):
+                lines += event(
+                    "content_block_delta",
+                    {"type": "content_block_delta", "index": index,
+                     "delta": {"type": "signature_delta", "signature": block["signature"]}},
+                )
+        else:
+            lines += event(
+                "content_block_start",
+                {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}},
+            )
+            text = block.get("text") or ""
+            for start in range(0, len(text), piece_len):
+                lines += event(
+                    "content_block_delta",
+                    {"type": "content_block_delta", "index": index,
+                     "delta": {"type": "text_delta", "text": text[start : start + piece_len]}},
+                )
+        lines += event("content_block_stop", {"type": "content_block_stop", "index": index})
+    lines += event(
+        "message_delta",
+        {"type": "message_delta", "delta": {"stop_reason": body.get("stop_reason", "end_turn")},
+         "usage": {"output_tokens": usage.get("output_tokens", 0)}},
+    )
+    lines += event("message_stop", {"type": "message_stop"})
+    return lines
+
+
 def test_claude5_thinking_routes_to_native_endpoint(monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
     inferencer = run_openrouter.OpenrouterInferencer(
         "anthropic/claude-sonnet-5", enable_thinking=True, backend="vercel-gateway"
     )
-    session = ScriptedSession([FakeResponse(200, native_body())])
+    session = ScriptedSession([FakeStreamResponse(native_sse_lines(native_body()))])
     call = inferencer.call_model("prompt", session=session)
 
     request = session.calls[0]
@@ -404,14 +467,40 @@ def test_claude5_thinking_routes_to_native_endpoint(monkeypatch):
     assert request["headers"]["anthropic-version"] == "2023-06-01"
     assert request["payload"]["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert "reasoning" not in request["payload"]
+    # Native path streams (the 2026-07-13 sonnet wall-kill fix) with the bare flag —
+    # stream_options is an OpenAI-compatible extension the native endpoint doesn't take.
+    assert request["payload"]["stream"] is True
+    assert "stream_options" not in request["payload"]
 
     assert call.ok and call.content == "FINAL ANSWER: e2e4"
     assert call.thinking_content == "Summarized reasoning about the position."
     assert call.thinking_source == "summary"
     assert call.usage["prompt_tokens"] == 100 and call.usage["completion_tokens"] == 900
     assert call.usage["total_tokens"] == 1000
+    assert call.ttft_ms is not None
     # Raw native message (thinking blocks + signature) preserved for storage
     assert call.raw_message["content"][0]["signature"] == "sig-abc"
+
+
+def test_native_stream_truncation_is_stream_drop(monkeypatch, no_sleep):
+    """A native stream cut before message_delta/message_stop (the 340s wall shape that
+    burned 70+ billed sonnet calls on 2026-07-13) is a billed-risk stream_drop."""
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
+    inferencer = run_openrouter.OpenrouterInferencer(
+        "anthropic/claude-sonnet-5", enable_thinking=True, backend="vercel-gateway", max_retries=4
+    )
+
+    def truncated():
+        lines = native_sse_lines(native_body())
+        cut = next(i for i, line in enumerate(lines) if b"message_delta" in line)
+        return FakeStreamResponse(lines[:cut])
+
+    session = ScriptedSession([truncated() for _ in range(10)])
+    call = inferencer.call_model("prompt", session=session)
+    assert not call.ok
+    assert len(session.requests_made) == throttle.EXPENSIVE_MAX_ATTEMPTS
+    assert all(attempt["error_class"] == "stream_drop" for attempt in call.attempts)
+    assert all(attempt["reasoning_chars"] > 0 for attempt in call.attempts), "partial thinking recorded"
 
 
 def test_claude5_without_thinking_stays_on_chat_completions(monkeypatch):

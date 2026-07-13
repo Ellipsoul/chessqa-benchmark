@@ -300,6 +300,35 @@ def test_clean_eof_without_terminator_is_stream_drop(inferencer, no_sleep):
     assert "truncated upstream" in call.content
 
 
+def test_forged_done_without_completion_evidence_is_stream_drop(inferencer, no_sleep):
+    """Observed live (qwen3.7-max, 2026-07-12, second wave): when the gateway kills a
+    stream at its ~785s duration ceiling it sends a graceful [DONE] on the way out, so
+    terminator-presence checks pass the corpse as success. Completion requires POSITIVE
+    evidence — finish_reason or usage — not just [DONE]."""
+    def forged():
+        lines = sse_lines_from_body(success_body(reasoning="deep thought"))[:4]  # deltas only
+        lines.append(b"data: [DONE]")
+        return FakeStreamResponse(lines)
+
+    session = ScriptedSession([forged() for _ in range(10)])
+    call = inferencer.call_model("prompt", session=session)
+    assert not call.ok
+    assert len(session.requests_made) == throttle.EXPENSIVE_MAX_ATTEMPTS
+    assert all(attempt["error_class"] == "stream_drop" for attempt in call.attempts)
+    assert all(attempt["saw_done"] is True for attempt in call.attempts), "forensics: [DONE] was forged"
+    assert "truncated upstream" in call.content
+
+
+def test_in_stream_error_event_is_stream_drop(inferencer, no_sleep):
+    lines = sse_lines_from_body(success_body(reasoning="deep thought"))[:4]
+    lines.append(b'data: {"error": {"code": 502, "message": "provider disconnected"}}')
+    session = ScriptedSession([FakeStreamResponse(lines), streamed_success()])
+    call = inferencer.call_model("prompt", session=session)
+    assert call.ok, "error event retried, second attempt succeeded"
+    assert call.attempts[0]["error_class"] == "stream_drop"
+    assert call.attempts[0]["stream_chunks"] > 0
+
+
 def test_usage_without_done_is_accepted(inferencer):
     """A stream that delivers usage (or finish_reason) but no [DONE] line is complete —
     only a stream with no terminator of any kind counts as truncated."""

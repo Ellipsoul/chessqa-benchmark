@@ -410,6 +410,7 @@ def consume_chat_sse(
             "stream_chunks": delta_events,
             "content_chars": sum(len(part) for part in content_parts),
             "reasoning_chars": sum(len(part) for part in reasoning_parts),
+            "saw_done": saw_done,
         }
 
     try:
@@ -427,6 +428,12 @@ def consume_chat_sse(
                 break
             chunk = json.loads(payload)
             data_events += 1
+            if chunk.get("error"):
+                # Mid-stream error event (OpenRouter/gateway convention): the provider or
+                # gateway aborted the generation. Billed-risk if tokens already flowed.
+                raise StreamDrop(
+                    RuntimeError(f"in-stream error event: {json.dumps(chunk['error'])[:300]}"), stream_info()
+                )
             for key in ("id", "model", "provider", "created"):
                 if chunk.get(key) is not None and key not in meta:
                     meta[key] = chunk[key]
@@ -457,6 +464,8 @@ def consume_chat_sse(
                     first_token_ms = int((time.monotonic() - started_at_monotonic) * 1000)
                 if on_delta is not None:
                     on_delta()
+    except StreamDrop:
+        raise
     except Exception as stream_error:
         raise StreamDrop(stream_error, stream_info()) from stream_error
 
@@ -464,14 +473,20 @@ def consume_chat_sse(
         raise ValueError("2xx response produced no SSE data events (streaming not honored?)")
     if delta_events == 0 and usage is None:
         raise ValueError(f"SSE stream had {data_events} data events but no message deltas or usage")
-    if not saw_done and usage is None and finish_reason is None:
-        # Clean EOF mid-generation with no terminator of any kind. Observed live
-        # 2026-07-12: the gateway cuts streams at a hard ~785s total-duration ceiling
-        # (distinct from the fixed 340s idle wall) — four qwen3.7-max streams all closed
-        # at exactly 785.1s with no [DONE]/finish_reason/usage, mid-sentence. Treat as a
+    if usage is None and finish_reason is None:
+        # No POSITIVE completion evidence. A complete gateway stream carries finish_reason
+        # and (with stream_options.include_usage) a usage chunk; their joint absence means
+        # the generation was cut, EVEN IF a [DONE] line arrived — observed live 2026-07-12:
+        # the gateway kills streams at a hard ~785s total-duration ceiling (distinct from
+        # the fixed 340s idle wall) and forges a graceful [DONE] on the way out, so
+        # absence-of-terminator checks pass the corpse as success (six qwen3.7-max streams,
+        # all cut at exactly 785.1s, single attempt marked "ok", empty content). Treat as a
         # dropped stream (billed-risk retry), never as a successful empty response.
         raise StreamDrop(
-            RuntimeError("SSE stream ended without [DONE], finish_reason, or usage (truncated upstream)"),
+            RuntimeError(
+                "SSE stream ended without finish_reason or usage "
+                f"(saw_done={saw_done}) — truncated upstream"
+            ),
             stream_info(),
         )
 

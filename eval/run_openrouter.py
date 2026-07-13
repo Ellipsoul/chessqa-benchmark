@@ -1366,13 +1366,15 @@ def filter_incomplete_tasks(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Split tasks into (incomplete -> re-run, complete -> keep) for resume.
 
-    A task counts as complete only if its saved result has a non-empty response that isn't
-    an "ERROR:..." retry-exhaustion marker. Results scored ``max_token_reached`` are
-    re-run only when ``retry_capped`` (--retry-capped) is set: upstream retried them
-    unconditionally as presumed infrastructure failures, but this project records 32K-cap
-    exhaustion as an experimental outcome per model/category (policy in
-    docs/model-trials/2026-07-12-smoke-campaign.md), and the unconditional retry
-    re-billed every capped task on every resume of a run.
+    A task counts as complete if its saved result has a non-empty response that isn't an
+    "ERROR:..." retry-exhaustion marker, OR is scored ``max_token_reached`` — capped rows
+    are recorded experimental outcomes (policy in
+    docs/model-trials/2026-07-12-smoke-campaign.md) and count complete even when the
+    response text is EMPTY, which is the common shape for thinking models that burn the
+    whole token budget on reasoning and never emit an answer (observed 2026-07-13: seven
+    deepseek caps with ~90K chars of thinking and response == "" bypassed the cap-keep
+    logic through the response-emptiness check and were re-billed on resume).
+    ``retry_capped`` (--retry-capped) restores upstream behavior: re-run every capped row.
     """
     incomplete_tasks = []
     complete_results = []
@@ -1383,14 +1385,13 @@ def filter_incomplete_tasks(
         task_id = task.get("task_id")
         if task_id in existing_results:
             existing_result = existing_results[task_id]
-            # Check if inference was completed successfully
-            if (
-                "inference" in existing_result
-                and "response" in existing_result["inference"]
-                and existing_result["inference"]["response"]
-                and not existing_result["inference"]["response"].startswith("ERROR")
-            ):
-                error_type = existing_result["inference"].get("error_type", "")
+            inference = existing_result.get("inference") or {}
+            response = inference.get("response") or ""
+            is_error_marker = response.startswith("ERROR")
+            error_type = inference.get("error_type", "")
+            # Check if inference was completed successfully (a capped row counts even
+            # with an empty response — the budget went entirely to reasoning)
+            if not is_error_marker and (response or error_type == "max_token_reached"):
                 if error_type == "max_token_reached" and retry_capped:
                     incomplete_tasks.append(task)
                     max_token_retry_count += 1

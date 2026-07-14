@@ -61,6 +61,10 @@ AI_GATEWAY_API_KEY=... python eval/run_openrouter.py --dataset-root benchmark \
 # Rebuild the SQLite results index from the canonical JSONLs
 python eval/storage.py ingest results/*.jsonl --dataset-root benchmark
 
+# Export canonical runs to static JSON for the web explorer
+# (writes ../chess-benchmark-showcase/public/data in the sibling showcase repo)
+make export-web
+
 # Probe which reasoning payload shape enables thinking for a model (few cents)
 python eval/probe_reasoning.py --model anthropic/claude-haiku-4.5
 

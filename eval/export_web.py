@@ -6,6 +6,7 @@ is the sibling showcase repo's public/data. Read-only on the DB; raw provider pa
 (raw_message etc.) are never exported.
 """
 
+import argparse
 import json
 import re
 import sqlite3
@@ -15,6 +16,7 @@ from pathlib import Path
 import chess
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import storage  # noqa: E402
 from run_openrouter import format_prompt  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -373,3 +375,23 @@ def build_export(conn: sqlite3.Connection, out_dir: Path) -> dict:
     }
     total_bytes += _write_json(out_dir / "index.json", index)
     return {"runs": len(runs), "tasks": len(task_rows), "bytes": total_bytes}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Export canonical smoke runs to static JSON for the web explorer")
+    parser.add_argument("--db-path", type=Path, default=REPO_ROOT / "results" / "chessqa.sqlite3")
+    # Default assumes the showcase repo is checked out as a sibling of this repo.
+    parser.add_argument("--out-dir", type=Path, default=REPO_ROOT.parent / "chess-benchmark-showcase" / "public" / "data")
+    args = parser.parse_args()
+    if not args.db_path.exists():
+        raise SystemExit(f"{args.db_path} not found — rebuild with: python eval/storage.py ingest results/*.jsonl --dataset-root benchmark")
+    conn = storage.connect(args.db_path)
+    try:
+        summary = build_export(conn, args.out_dir)
+    finally:
+        conn.close()
+    print(f"exported {summary['runs']} runs x {summary['tasks']} tasks -> {args.out_dir} ({summary['bytes']/1e6:.1f} MB)")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,4 +1,4 @@
-.PHONY: venv install install-optional lint lint-fix format check test
+.PHONY: venv install install-optional lint lint-fix format check test export-web
 
 VENV := .venv
 PY := $(VENV)/bin/python
@@ -29,3 +29,6 @@ check: lint
 
 test:
 	$(PY) -m pytest tests/ -q
+
+export-web:
+	$(PY) eval/export_web.py --db-path results/chessqa.sqlite3 --out-dir ../chess-benchmark-showcase/public/data

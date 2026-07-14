@@ -45,3 +45,33 @@ def test_run_display_names():
     assert export_web.run_display_name("anthropic_claude-sonnet-5-verbose-cot", "anthropic/claude-sonnet-5", 1) == "claude-sonnet-5 (verbose CoT)"
     assert export_web.run_display_name("anthropic_claude-haiku-4.5", "anthropic/claude-haiku-4.5", 0) == "claude-haiku-4.5 (no thinking)"
     assert export_web.run_display_name("meta_llama-4-maverick", "meta/llama-4-maverick", 0) == "llama-4-maverick (no thinking)"
+
+
+START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+
+def test_move_legality():
+    assert export_web.move_legality(START_FEN, "e2e4") == "legal"
+    assert export_web.move_legality(START_FEN, "e2e5") == "illegal"     # pawn can't triple-step
+    assert export_web.move_legality(START_FEN, "Qh5") == "unparseable"  # SAN, not UCI
+    assert export_web.move_legality(START_FEN, "e7e8q") == "illegal"    # promotion syntax accepted, move illegal here
+    assert export_web.move_legality(START_FEN, None) is None
+    assert export_web.move_legality(START_FEN, "  E2E4 ") == "legal"    # case/whitespace tolerant
+
+
+def test_split_input():
+    fen, moves = export_web.split_input("4kb1r/5ppp/p2p1q2/8 w KQk - 0 16 | d1b3 f8e7")
+    assert fen == "4kb1r/5ppp/p2p1q2/8 w KQk - 0 16"
+    assert moves == ["d1b3", "f8e7"]
+    fen, moves = export_web.split_input("8/8/8/8/8/8/8/K6k w - - 0 1")
+    assert moves == []
+
+
+def test_outcome_codes():
+    assert export_web.outcome_code("correct", "legal") == "correct"
+    assert export_web.outcome_code("max_token_reached", None) == "capped"
+    assert export_web.outcome_code("format_error", None) == "format_error"
+    assert export_web.outcome_code("wrong_answer", "illegal") == "illegal"
+    assert export_web.outcome_code("wrong_answer", "legal") == "wrong"
+    assert export_web.outcome_code("wrong_answer", "unparseable") == "wrong"  # unparseable is a badge, not an outcome
+    assert export_web.outcome_code("multi_extra_items", None) == "wrong"      # multi partials collapse; raw error_type is exported alongside

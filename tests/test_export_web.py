@@ -75,3 +75,33 @@ def test_outcome_codes():
     assert export_web.outcome_code("wrong_answer", "legal") == "wrong"
     assert export_web.outcome_code("wrong_answer", "unparseable") == "wrong"  # unparseable is a badge, not an outcome
     assert export_web.outcome_code("multi_extra_items", None) == "wrong"      # multi partials collapse; raw error_type is exported alongside
+
+
+def test_primitives_moves_single_and_multi():
+    p = export_web.parse_answer_primitives("short_tactics_theme_mateIn2", "h6h7")
+    assert p == {"type": "moves", "arrows": [{"from": "h6", "to": "h7"}]}
+    p = export_web.parse_answer_primitives("short_tactics_theme_promotion", "e7e8q")
+    assert p["arrows"] == [{"from": "e7", "to": "e8", "promotion": "q"}]
+    p = export_web.parse_answer_primitives("structural_check_in_1", "d2d3, d2g2")
+    assert [a["to"] for a in p["arrows"]] == ["d3", "g2"]
+
+
+def test_primitives_squares():
+    p = export_web.parse_answer_primitives("structural_protect_squares", "f6, f8")
+    assert p == {"type": "squares", "squares": ["f6", "f8"]}
+
+
+def test_primitives_eval_and_choice():
+    assert export_web.parse_answer_primitives("position_judgement_losing", "-400") == {"type": "eval", "value": -400}
+    assert export_web.parse_answer_primitives("position_judgement_advantage", "+200") == {"type": "eval", "value": 200}
+    assert export_web.parse_answer_primitives("semantic_keyword", "A") == {"type": "choice", "letter": "A"}
+    assert export_web.parse_answer_primitives("semantic_keyword", "(c)") == {"type": "choice", "letter": "C"}
+
+
+def test_primitives_fallbacks():
+    # model wrote prose instead of a move -> text fallback, never an exception
+    p = export_web.parse_answer_primitives("short_tactics_rating_expert", "The best move is Qxe6!")
+    assert p == {"type": "text", "text": "The best move is Qxe6!"}
+    assert export_web.parse_answer_primitives("motifs_pin", "None") == {"type": "none"}
+    assert export_web.parse_answer_primitives("short_tactics_rating_expert", None) == {"type": "none"}
+    assert export_web.parse_answer_primitives("short_tactics_rating_expert", "  ") == {"type": "none"}

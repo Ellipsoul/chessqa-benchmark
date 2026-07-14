@@ -143,3 +143,57 @@ def test_primitives_fen_diff():
     # invalid FEN from a confused model -> text fallback
     p = export_web.parse_answer_primitives("structural_state_tracking_long", "not a fen at all")
     assert p["type"] == "text"
+
+
+@pytest.fixture(scope="session")
+def export_dir(db, tmp_path_factory):
+    out_dir = tmp_path_factory.mktemp("data")
+    export_web.build_export(db, out_dir)
+    return out_dir
+
+
+def test_export_file_inventory(export_dir):
+    assert (export_dir / "index.json").exists()
+    assert len(list((export_dir / "categories").glob("*.json"))) == 5
+    assert len(list((export_dir / "traces").glob("*.json"))) == 50
+
+
+def test_index_shape(export_dir):
+    index = json.loads((export_dir / "index.json").read_text())
+    assert len(index["runs"]) == 16
+    assert len(index["tasks"]) == 50
+    for task in index["tasks"]:
+        assert len(task["outcomes"]) == 16
+        assert set(task["outcomes"].values()) <= {"correct", "wrong", "illegal", "capped", "format_error"}
+    gemini = next(r for r in index["runs"] if r["slug"] == "google_gemini-3.1-pro-preview-thinking")
+    assert gemini["n_correct"] == 45 and gemini["n_results"] == 50
+
+
+def test_category_payloads_resolved_and_private(export_dir):
+    shorttac = json.loads((export_dir / "categories" / "short-tactics.json").read_text())
+    assert len(shorttac["tasks"]) == 24
+    for task in shorttac["tasks"]:
+        assert "CONTEXT_PLACEHOLDER" not in task["resolved_prompt"]
+        assert "FORMAT_EXAMPLE_PLACEHOLDER" not in task["resolved_prompt"]
+        assert len(task["results"]) == 16
+        for result in task["results"]:
+            assert "thinking_content" not in result and "raw_message" not in result
+    # state tracking: input carries the uci move prefix for the animation
+    structural = json.loads((export_dir / "categories" / "structural.json").read_text())
+    tracking = next(t for t in structural["tasks"] if t["task_type"] == "structural_state_tracking_long")
+    assert len(tracking["input_moves"]) > 0
+
+
+def test_traces_have_capped_exhibit(export_dir):
+    blob = json.loads((export_dir / "traces" / "short_tactics_theme_defensiveMove_0024.json").read_text())
+    gem = blob["traces"]["google_gemini-3.1-pro-preview-thinking"]
+    assert len(gem["content"]) > 200_000  # the 266K-char capped loop survives the pipeline
+    assert gem["response"] == ""
+
+
+def test_export_is_deterministic(db, export_dir, tmp_path_factory):
+    second = tmp_path_factory.mktemp("data2")
+    export_web.build_export(db, second)
+    for path in sorted(export_dir.rglob("*.json")):
+        other = second / path.relative_to(export_dir)
+        assert path.read_bytes() == other.read_bytes(), f"nondeterministic: {path.name}"

@@ -6,6 +6,7 @@ is the sibling showcase repo's public/data. Read-only on the DB; raw provider pa
 (raw_message etc.) are never exported.
 """
 
+import json
 import re
 import sqlite3
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 import chess
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from run_openrouter import format_prompt  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MIN_RESULTS = 50
@@ -231,3 +233,143 @@ def parse_answer_primitives(task_type: str, answer: str | None, correct_fen: str
         raise ValueError(task_type)  # unknown family: text fallback keeps the export alive
     except ValueError:
         return {"type": "text", "text": text}
+
+
+def resolve_prompt(task: sqlite3.Row) -> str:
+    """Fill CONTEXT/FORMAT_EXAMPLE placeholders exactly as the runner did (group 1, no context)."""
+    task_dict = {
+        "question": task["question"],
+        "input": task["input"],
+        "format_examples": json.loads(task["format_examples"]) if task["format_examples"] else [],
+    }
+    return format_prompt(task_dict, add_context=False, format_example_group=1)
+
+
+def _write_json(path: Path, obj) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    blob = json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n"
+    path.write_text(blob, encoding="utf-8")
+    return len(blob.encode("utf-8"))
+
+
+def _run_summary(conn: sqlite3.Connection, run: sqlite3.Row, outcomes_by_task: dict) -> dict:
+    rows = list(conn.execute("SELECT * FROM results WHERE run_id = ?", (run["run_id"],)))
+    slug = run["run_key"]
+    outcome_list = [outcomes_by_task[row["task_id"]][slug] for row in rows]
+    thinking_sources: dict[str, int] = {}
+    for row in rows:
+        source = row["thinking_source"] or "none"
+        thinking_sources[source] = thinking_sources.get(source, 0) + 1
+    costs = [row["cost_usd"] for row in rows if row["cost_usd"] is not None]
+    tokens = [row["completion_tokens"] for row in rows if row["completion_tokens"] is not None]
+    return {
+        "slug": slug,
+        "display_name": run_display_name(slug, run["model"], run["enable_thinking"]),
+        "model": run["model"],
+        "backend": run["backend"],
+        "enable_thinking": bool(run["enable_thinking"]),
+        "reasoning_config": json.loads(run["reasoning_config"]) if run["reasoning_config"] else None,
+        "git_commit": run["git_commit"],
+        "started_at": run["started_at"],
+        "n_results": len(rows),
+        "n_correct": sum(1 for o in outcome_list if o == "correct"),
+        "n_capped": sum(1 for o in outcome_list if o == "capped"),
+        "n_illegal": sum(1 for o in outcome_list if o == "illegal"),
+        "total_cost_usd": round(sum(costs), 4) if costs else None,
+        "avg_completion_tokens": round(sum(tokens) / len(tokens)) if tokens else None,
+        "thinking_sources": thinking_sources,
+    }
+
+
+def build_export(conn: sqlite3.Connection, out_dir: Path) -> dict:
+    runs = select_runs(conn)
+    if not runs:
+        raise SystemExit("No canonical runs found (status='complete' with >=50 results).")
+    for run in runs:  # resolved_prompt is exported once per task; that only holds if all runs share the variant flags
+        if run["add_context"] or run["format_example_group"] != 1:
+            raise SystemExit(f"{run['run_key']}: prompt-variant flags differ; make resolved_prompt per-run first.")
+    run_ids = [run["run_id"] for run in runs]
+    slug_by_id = {run["run_id"]: run["run_key"] for run in runs}
+
+    placeholders = ",".join("?" * len(run_ids))
+    task_rows = list(conn.execute(
+        f"""SELECT DISTINCT t.* FROM tasks t
+            JOIN results r ON r.task_id = t.task_id AND r.run_id IN ({placeholders})
+            ORDER BY t.task_category, t.task_type""", run_ids))
+    result_rows = list(conn.execute(
+        f"SELECT * FROM results WHERE run_id IN ({placeholders})", run_ids))
+    by_task: dict[str, dict[str, sqlite3.Row]] = {}
+    for row in result_rows:
+        by_task.setdefault(row["task_id"], {})[slug_by_id[row["run_id"]]] = row
+
+    total_bytes = 0
+    outcomes_by_task: dict[str, dict[str, str]] = {}
+    categories: dict[str, dict] = {}
+    for task in task_rows:
+        fen, input_moves = split_input(task["input"])
+        slug = CATEGORY_SLUGS[task["task_category"]]
+        is_tactics_single = task["task_type"].startswith("short_tactics")
+        task_results, outcomes, traces = [], {}, {}
+        for run in runs:
+            row = by_task[task["task_id"]][run["run_key"]]
+            legality = move_legality(fen, row["extracted"]) if is_tactics_single else None
+            outcome = outcome_code(row["error_type"], legality)
+            outcomes[run["run_key"]] = outcome
+            task_results.append({
+                "run": run["run_key"],
+                "extracted": row["extracted"],
+                "error_type": row["error_type"],
+                "outcome": outcome,
+                "legality": legality,
+                "primitives": parse_answer_primitives(task["task_type"], row["extracted"], correct_fen=task["correct_answer"]),
+                "cost_usd": row["cost_usd"],
+                "completion_tokens": row["completion_tokens"],
+                "reasoning_tokens": row["reasoning_tokens"],
+                "latency_ms": row["latency_ms"],
+                "n_attempts": row["n_attempts"],
+                "thinking_source": row["thinking_source"],
+                "thinking_chars": len(row["thinking_content"] or ""),
+            })
+            traces[run["run_key"]] = {
+                "thinking_source": row["thinking_source"],
+                "content": row["thinking_content"] or "",
+                "response": row["response"] or "",
+            }
+        outcomes_by_task[task["task_id"]] = outcomes
+        categories.setdefault(slug, {"category": task["task_category"], "slug": slug, "tasks": []})
+        categories[slug]["tasks"].append({
+            "task_id": task["task_id"],
+            "task_type": task["task_type"],
+            "task_category": task["task_category"],
+            "question": task["question"],
+            "resolved_prompt": resolve_prompt(task),
+            "input_fen": fen,
+            "input_moves": input_moves,
+            "metadata": json.loads(task["metadata"]) if task["metadata"] else None,
+            "correct_answer": task["correct_answer"],
+            "answer_type": task["answer_type"],
+            "correct_primitives": parse_answer_primitives(task["task_type"], task["correct_answer"]),
+            "results": task_results,
+        })
+        total_bytes += _write_json(out_dir / "traces" / f"{task['task_id']}.json",
+                                   {"task_id": task["task_id"], "traces": traces})
+
+    for slug, payload in categories.items():
+        total_bytes += _write_json(out_dir / "categories" / f"{slug}.json", payload)
+
+    index = {
+        "generated_at": max(run["updated_at"] or "" for run in runs),
+        "dataset_hash": task_rows[0]["dataset_hash"],
+        "runs": [_run_summary(conn, run, outcomes_by_task) for run in runs],
+        "tasks": [{
+            "task_id": task["task_id"],
+            "task_type": task["task_type"],
+            "task_category": task["task_category"],
+            "category_slug": CATEGORY_SLUGS[task["task_category"]],
+            "fen": split_input(task["input"])[0],
+            "answer_type": task["answer_type"],
+            "outcomes": outcomes_by_task[task["task_id"]],
+        } for task in task_rows],
+    }
+    total_bytes += _write_json(out_dir / "index.json", index)
+    return {"runs": len(runs), "tasks": len(task_rows), "bytes": total_bytes}

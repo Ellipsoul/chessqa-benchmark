@@ -105,3 +105,41 @@ def test_primitives_fallbacks():
     assert export_web.parse_answer_primitives("motifs_pin", "None") == {"type": "none"}
     assert export_web.parse_answer_primitives("short_tactics_rating_expert", None) == {"type": "none"}
     assert export_web.parse_answer_primitives("short_tactics_rating_expert", "  ") == {"type": "none"}
+
+
+def test_primitives_motif_chains():
+    p = export_web.parse_answer_primitives("motifs_pin", "b4>d2>e1")
+    assert p == {"type": "chain", "arrows": [{"from": "b4", "to": "d2"}, {"from": "d2", "to": "e1"}]}
+    p = export_web.parse_answer_primitives("motifs_skewer", "d3>e4>f5")
+    assert len(p["arrows"]) == 2
+    p = export_web.parse_answer_primitives("motifs_battery", "b3>e3")
+    assert p == {"type": "chain", "arrows": [{"from": "b3", "to": "e3"}]}
+    p = export_web.parse_answer_primitives("motifs_fork", "d3>c5-f2")
+    assert p == {"type": "chain", "arrows": [{"from": "d3", "to": "c5"}, {"from": "d3", "to": "f2"}]}
+    # multiple motifs, comma-separated
+    p = export_web.parse_answer_primitives("motifs_pin", "b4>d2>e1, a4>c2>e2")
+    assert len(p["arrows"]) == 4
+
+
+def test_primitives_pieces():
+    p = export_web.parse_answer_primitives("structural_check_detection", "White Knight at f6")
+    assert p == {"type": "pieces", "items": [{"color": "White", "piece": "Knight", "square": "f6"}]}
+    arrangement = "White King: ['c1'], White Rook: ['d1', 'h1'], Black Queen: ['f6']"
+    p = export_web.parse_answer_primitives("structural_piece_arrangement", arrangement)
+    assert {"color": "White", "piece": "Rook", "square": "h1"} in p["items"]
+    assert len(p["items"]) == 4
+
+
+def test_primitives_fen_diff():
+    correct = "5rk1/4bppp/P2p4/8/1P1rp3/N7/P4PPP/1R3RK1 b - - 2 22"
+    # model imagined the rook on d5 instead of d4 -> both squares differ from the reference
+    wrong = "5rk1/4bppp/P2p4/3r4/1P2p3/N7/P4PPP/1R3RK1 b - - 2 22"
+    p = export_web.parse_answer_primitives("structural_state_tracking_long", wrong, correct_fen=correct)
+    assert p["type"] == "fen"
+    assert p["diff_squares"] == ["d4", "d5"]
+    # the correct answer itself: no reference passed -> no diff
+    p = export_web.parse_answer_primitives("structural_state_tracking_long", correct)
+    assert p["diff_squares"] == []
+    # invalid FEN from a confused model -> text fallback
+    p = export_web.parse_answer_primitives("structural_state_tracking_long", "not a fen at all")
+    assert p["type"] == "text"

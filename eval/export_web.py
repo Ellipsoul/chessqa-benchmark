@@ -134,6 +134,70 @@ def _parse_choice(text: str) -> dict:
     return {"type": "choice", "letter": match.group(1).upper()}
 
 
+PIECE_AT_RE = re.compile(r"(White|Black)\s+(King|Queen|Rook|Bishop|Knight|Pawn)\s+at\s+([a-h][1-8])", re.IGNORECASE)
+ARRANGEMENT_RE = re.compile(r"(White|Black)\s+(King|Queen|Rook|Bishop|Knight|Pawn):\s*\[([^\]]*)\]", re.IGNORECASE)
+
+
+def _parse_chain(text: str) -> dict:
+    arrows = []
+    for part in _split_multi(text):
+        squares = [square.strip() for square in part.split(">")]
+        if len(squares) < 2 or not all(SQUARE_RE.match(square) for square in squares):
+            raise ValueError(part)
+        arrows.extend({"from": a, "to": b} for a, b in zip(squares, squares[1:], strict=False))
+    return {"type": "chain", "arrows": arrows}
+
+
+def _parse_fork(text: str) -> dict:
+    arrows = []
+    for part in _split_multi(text):
+        if ">" not in part:
+            raise ValueError(part)
+        forker, victims_blob = part.split(">", 1)
+        forker = forker.strip()
+        victims = [victim.strip() for victim in victims_blob.split("-")]
+        if not SQUARE_RE.match(forker) or not all(SQUARE_RE.match(victim) for victim in victims):
+            raise ValueError(part)
+        arrows.extend({"from": forker, "to": victim} for victim in victims)
+    return {"type": "chain", "arrows": arrows}
+
+
+def _parse_pieces_at(text: str) -> dict:
+    items = [
+        {"color": color.title(), "piece": piece.title(), "square": square.lower()}
+        for color, piece, square in PIECE_AT_RE.findall(text)
+    ]
+    if not items:
+        raise ValueError(text)
+    return {"type": "pieces", "items": items}
+
+
+def _parse_piece_arrangement(text: str) -> dict:
+    items = []
+    for color, piece, squares_blob in ARRANGEMENT_RE.findall(text):
+        for square in re.findall(r"[a-h][1-8]", squares_blob):
+            items.append({"color": color.title(), "piece": piece.title(), "square": square})
+    if not items:
+        raise ValueError(text)
+    return {"type": "pieces", "items": items}
+
+
+def _parse_fen_answer(text: str, correct_fen: str | None) -> dict:
+    try:
+        board = chess.Board(text)
+    except ValueError as exc:
+        raise ValueError(text) from exc
+    diff_squares = []
+    if correct_fen:
+        reference = chess.Board(correct_fen)
+        diff_squares = sorted(
+            chess.square_name(square)
+            for square in chess.SQUARES
+            if board.piece_at(square) != reference.piece_at(square)
+        )
+    return {"type": "fen", "fen": board.fen(), "diff_squares": diff_squares}
+
+
 def parse_answer_primitives(task_type: str, answer: str | None, correct_fen: str | None = None) -> dict:
     """Map an answer string to board-render primitives; {'type':'text'} on anything unparseable.
 
@@ -154,6 +218,16 @@ def parse_answer_primitives(task_type: str, answer: str | None, correct_fen: str
             return _parse_eval(text)
         if task_type.startswith("semantic"):
             return _parse_choice(text)
-        raise ValueError(task_type)  # families added in Task 4
+        if task_type in ("motifs_pin", "motifs_skewer", "motifs_battery"):
+            return _parse_chain(text)
+        if task_type == "motifs_fork":
+            return _parse_fork(text)
+        if task_type == "structural_check_detection":
+            return _parse_pieces_at(text)
+        if task_type == "structural_piece_arrangement":
+            return _parse_piece_arrangement(text)
+        if task_type.startswith("structural_state_tracking"):
+            return _parse_fen_answer(text, correct_fen)
+        raise ValueError(task_type)  # unknown family: text fallback keeps the export alive
     except ValueError:
         return {"type": "text", "text": text}

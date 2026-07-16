@@ -2,7 +2,7 @@
 
 This module sits at the front of the data flow:
 
-    raw Lichess dumps -> dataset/0N_*.py generators -> benchmark JSONL -> eval/run_openrouter.py
+    raw Lichess dumps -> dataset/0N_*.py generators -> benchmark JSONL -> eval/run_benchmark.py
 
 It provides the pieces every generator needs:
 
@@ -12,7 +12,7 @@ It provides the pieces every generator needs:
 - FEN/board helpers (``get_piece_arrangement``, ``fen_to_pieces``, ``get_piece_name``) used both
   to build questions and to inject board-state context at inference time (``--add-context``).
 - ``construct_prompt``: assembles a question with the literal placeholder strings that the eval
-  runner substitutes at inference time (see ``format_prompt`` in eval/run_openrouter.py).
+  runner substitutes at inference time (see ``format_prompt`` in eval/run_benchmark.py).
 - I/O and reproducibility helpers (``save_tasks``, ``read_puzzles``, ``seed_everything``).
 """
 

@@ -40,9 +40,9 @@ def test_run_meta_from_filename():
     # Archived verbose baseline: no suffix tokens -> flags come from the stats sidecar at ingest
     meta = storage.run_meta_from_filename("results/anthropic_claude-sonnet-5-verbose-cot.jsonl")
     assert meta["enable_thinking"] is False and meta["model"] == "anthropic_claude-sonnet-5-verbose-cot"
-    meta = storage.run_meta_from_filename("x/gpt-5-thinking-piecearr-fmt2-openrouter.jsonl")
+    meta = storage.run_meta_from_filename("x/gpt-5-thinking-piecearr-fmt2.jsonl")
     assert meta == {
-        "backend": "openrouter", "enable_thinking": True, "add_context": True,
+        "backend": "vercel-gateway", "enable_thinking": True, "add_context": True,
         "format_example_group": 2, "model": "gpt-5",
     }
     meta = storage.run_meta_from_filename("x/anthropic_claude-haiku-4.5.jsonl")
@@ -232,14 +232,14 @@ def test_concurrent_writers_do_not_error(tmp_path):
 
 def test_record_hook_survives_locked_db(tmp_path, capsys):
     """A locked DB must never kill the (paid) inference run: the hook warns and continues."""
-    import run_openrouter
+    import run_benchmark
 
     db_path = tmp_path / "locked.sqlite3"
     hook_conn = storage.connect(db_path)
     run_id = storage.get_or_create_run(hook_conn, "lock-test", {"model": "m"})
     hook_conn.execute("PRAGMA busy_timeout = 100")  # don't wait 30s in the test
 
-    hook = run_openrouter.make_db_record_hook(hook_conn, run_id)
+    hook = run_benchmark.make_db_record_hook(hook_conn, run_id)
 
     blocker = storage.connect(db_path)
     blocker.execute("BEGIN IMMEDIATE")  # hold the write lock like a sibling run would
@@ -265,12 +265,12 @@ def test_record_hook_releases_writer_slot_per_row(tmp_path):
     commits, leaving its write transaction open across the minutes between task
     completions and starving every sibling process. After each recorded row, another
     connection must be able to take the writer slot IMMEDIATELY (busy_timeout=0)."""
-    import run_openrouter
+    import run_benchmark
 
     db_path = tmp_path / "shared.sqlite3"
     hook_conn = storage.connect(db_path)
     run_id = storage.get_or_create_run(hook_conn, "starve-test", {"model": "m"})
-    hook = run_openrouter.make_db_record_hook(hook_conn, run_id)
+    hook = run_benchmark.make_db_record_hook(hook_conn, run_id)
 
     sibling = sqlite3.connect(str(db_path))
     sibling.execute("PRAGMA busy_timeout = 0")  # any held writer slot fails instantly

@@ -105,7 +105,7 @@ all Claude 5s):**
   every chat-completions `reasoning` shape silently no-ops (zero reasoning tokens).
 - The runner auto-routes `--enable-thinking` runs to the gateway's Anthropic-native
   `/v1/messages` with `{"type": "adaptive", "display": "summarized"}`
-  (`anthropic_adaptive_thinking()` in `eval/run_openrouter.py`, boundary probe-verified
+  (`anthropic_adaptive_thinking()` in `eval/run_benchmark.py`, boundary probe-verified
   2026-07-10). `display: "full"` → 400; raw CoT is unavailable, period.
 - Response shape: native content blocks (`thinking` + `text`), normalized by
   `parse_native_anthropic_message`. `thinking_source: summary`.
@@ -158,8 +158,8 @@ minimax-m3):**
   Expect elevated `format_error` rates — that is signal, not harness breakage.
 
 **Every model:** per-call cost comes from `usage.cost` on the chat-completions path only;
-results filenames encode variant suffixes (`-thinking`, `-piecearr`, `-fmt2`,
-`-openrouter`) and resume/`--eval-only` require identical flags to find the file.
+results filenames encode variant suffixes (`-thinking`, `-piecearr`, `-fmt2`)
+and resume/`--eval-only` require identical flags to find the file.
 
 **Transport (FIXED 2026-07-12, PR #20):** the gateway kills **non-streaming** requests at
 ~340s of wire silence and bills the killed attempts. The runner now streams every

@@ -52,7 +52,7 @@ def type_counts() -> Counter:
 
 def slug_from_filename(path: Path) -> str:
     stem = path.stem
-    for suf in ("-openrouter", "-fmt2", "-piecearr", "-thinking", "-verbose-cot"):
+    for suf in ("-fmt2", "-piecearr", "-thinking", "-verbose-cot"):
         if stem.endswith(suf):
             stem = stem[: -len(suf)]
             break  # only the outermost run suffix; gpt-5.1-thinking keeps its name

@@ -14,13 +14,13 @@ way, ChessQA captures a more comprehensive picture of chess ability and understa
   - Short Tactics: best‑move puzzles by rating buckets (beginner→expert) and by theme (dozens of tactical themes)
   - Position Judgment: centipawn evaluation selection across bands (neutral/advantage/winning/…)
   - Semantic: multiple‑choice commentary understanding with several distractor strategies (keyword, piece+stage, semantic embedding, easy random)
-- OpenRouter evaluation runner with parallelism, resume, cost/tokens tracking, per‑category and per‑task‑type stats
+- Evaluation runner (Vercel AI Gateway) with parallelism, resume, cost/tokens tracking, per‑category and per‑task‑type stats
 - Dynamic dataset builders that regenerate as the underlying sources improve
 
 ## Repository Layout
 
 - `dataset/`: dataset generation scripts for each category
-- `eval/`: OpenRouter inference runner
+- `eval/`: inference runner (Vercel AI Gateway)
 - `benchmark/`: generated benchmark JSONL files (one per category)
 - `results/`: per‑model outputs (`*.jsonl`, `*_pretty.json`, `*_stats.json`)
 - `docs/`: project brief, the ChessQA paper, and planning notes
@@ -39,28 +39,27 @@ list in mind when comparing any numbers against the paper's published results.
    checked-in `benchmark/motifs.jsonl` still contains the upstream (truncated) prompts;
    any *regenerated* motifs data will include the full sentence and is therefore not
    prompt-identical to the paper's pin tasks.
-2. **`--add-context` piece ordering** (`eval/run_openrouter.py`, `get_context`). Upstream
+2. **`--add-context` piece ordering** (`eval/run_benchmark.py`, `get_context`). Upstream
    injected the piece arrangement in board-scan order (a1→h8); this fork uses the same
    canonical ordering the `piece_arrangement` answers demand (White then Black,
    King/Queen/Rook/Bishop/Knight/Pawn, squares alphabetical). Any run using `--add-context`
    (`-piecearr` result files) is not byte-comparable to upstream's piecearr runs.
-3. **Seeded subsampling** (`eval/run_openrouter.py`, `load_tasks`). `--N-samples-per-task`
+3. **Seeded subsampling** (`eval/run_benchmark.py`, `load_tasks`). `--N-samples-per-task`
    now shuffles with a fixed-seed RNG (upstream's comment claimed a fixed seed but used the
    unseeded global RNG). Subsampled runs are now reproducible and resume-coherent; full runs
    are unaffected.
-4. **Default inference backend is Vercel AI Gateway, not OpenRouter.** The runner grew a
-   `--backend {vercel-gateway,openrouter}` flag (default `vercel-gateway`); the paper's 23
-   runs all went through OpenRouter, which remains selectable for apples-to-apples
-   comparisons (those result files get an `-openrouter` suffix). Two knock-on effects:
-   cost accounting differs slightly (verified live: the gateway *does* return per-call
-   `cost`/`gateway_cost`/`market_cost` in `usage`, so cost columns in `*_stats.json` are
-   populated on both backends; the Vercel dashboard adds request-level observability),
-   and each result now records a `thinking_source` fidelity tag
-   (`full_text`/`summary`/`encrypted_only`/…) derived from the gateway's typed
+4. **Inference transport is Vercel AI Gateway, not OpenRouter.** The paper's 23 runs all
+   went through OpenRouter; this fork routes everything through the Vercel AI Gateway
+   (the runner was renamed `eval/run_benchmark.py`, and the OpenRouter code path was
+   removed on 2026-07-16). Two knock-on effects: cost accounting comes from the gateway
+   (verified live: it returns per-call `cost`/`gateway_cost`/`market_cost` in `usage`,
+   so cost columns in `*_stats.json` are populated; the Vercel dashboard adds
+   request-level observability), and each result records a `thinking_source` fidelity
+   tag (`full_text`/`summary`/`encrypted_only`/…) derived from the gateway's typed
    `reasoning_details` blocks.
 
 **Unaffected:** full-benchmark runs without `--add-context` use exactly the checked-in task
-prompts, so `--backend openrouter` runs remain apples-to-apples with the paper.
+prompts, so results remain prompt-identical to the paper (transport aside).
 
 **Non-behavioral deviations:**
 
@@ -68,10 +67,8 @@ prompts, so `--backend openrouter` runs remain apples-to-apples with the paper.
   `code/eval`); upstream's `code/plot` and `eval/browse_results.py` are not present. Because
   of the move, in-script default paths resolve outside the repo — always pass
   `--dataset-root benchmark --output-dir results` (and explicit paths to the generators).
-- API keys: `AI_GATEWAY_API_KEY` env var for the default backend. For `--backend
-  openrouter`: `OPENROUTER_API_KEY` env var, falling back to upstream's legacy
-  `../keys/api_keys.json` (a `keys/` directory *beside* this checkout) expecting
-  `{"openrouter_api_key": "..."}`.
+- API keys: `AI_GATEWAY_API_KEY` env var (fallback `VERCEL_OIDC_TOKEN`), from the shell
+  or the repo-root `.env`.
 - Tooling: pinned/capped `requirements.txt` (verified via fresh-venv install), ruff lint
   config in `pyproject.toml`, `Makefile`, `.venv`-based `setup.sh`, and a comprehensive
   documentation pass over all scripts. Stale CLI help texts for `--workers`/`--max-retries`/
@@ -84,12 +81,10 @@ prompts, so `--backend openrouter` runs remain apples-to-apples with the paper.
 - Optional for semantic MCQ embeddings: `pip install sentence-transformers faiss-cpu`
 
 API keys
-- Easiest: `cp .env.example .env` and fill in your key(s) — the eval runner loads the
+- Easiest: `cp .env.example .env` and fill in your key — the eval runner loads the
   repo-root `.env` at startup (gitignored; real environment variables take precedence).
-- Default backend (Vercel AI Gateway): `AI_GATEWAY_API_KEY` (create a key in the Vercel
-  dashboard under AI Gateway).
-- `--backend openrouter`: `OPENROUTER_API_KEY`, or upstream's legacy
-  `../keys/api_keys.json` beside the checkout (see `setup.sh`).
+- Vercel AI Gateway: `AI_GATEWAY_API_KEY` (create a key in the Vercel dashboard under
+  AI Gateway).
 
 ## Data
 
@@ -144,7 +139,7 @@ Note: comment cleaning and judging helpers for producing `data/mid/comment_datas
 
 Basic run (Vercel AI Gateway, the default backend)
 ```bash
-AI_GATEWAY_API_KEY=... python eval/run_openrouter.py \
+AI_GATEWAY_API_KEY=... python eval/run_benchmark.py \
   --dataset-root benchmark \
   --model anthropic/claude-haiku-4.5 \
   --output-dir results --workers 256
@@ -152,14 +147,12 @@ AI_GATEWAY_API_KEY=... python eval/run_openrouter.py \
 
 Smoke test (deterministic sample of ~1 task per task type):
 ```bash
-AI_GATEWAY_API_KEY=... python eval/run_openrouter.py \
+AI_GATEWAY_API_KEY=... python eval/run_benchmark.py \
   --dataset-root benchmark --output-dir results \
   --model anthropic/claude-haiku-4.5 --N-samples-per-task 1 --workers 16
 ```
 
 Options
-- Backend: `--backend {vercel-gateway,openrouter}` (default `vercel-gateway`; use
-  `openrouter` for paper-comparable runs — those results get an `-openrouter` suffix)
 - Rate limiting: `--rps 2.0 --burst 4` (request starts/second shared across all worker
   threads; `--workers 24` only sets in-flight concurrency — throughput is governed by rps)
 - Limit total tasks: `--max-tasks 800`
@@ -188,10 +181,10 @@ The released JSONL files intentionally keep templated prompts so that downstream
 - `CONTEXT_PLACEHOLDER` — replaced at inference time with autogenerated context (piece arrangement + legal moves) when `--add-context` is used.
 - `FORMAT_EXAMPLE_PLACEHOLDER` — replaced with a format example drawn from `format_examples`.
 
-The helper in `eval/run_openrouter.py` demonstrates how to resolve these placeholders. Minimal example:
+The helper in `eval/run_benchmark.py` demonstrates how to resolve these placeholders. Minimal example:
 
 ```python
-from code.eval.run_openrouter import format_prompt, get_context
+from eval.run_benchmark import format_prompt, get_context
 import json
 
 with open("data/benchmark/motifs.jsonl") as fh:
@@ -203,7 +196,7 @@ prompt = format_prompt(
     format_example_group=1       # choose example variant
 )
 
-# to reproduce OpenRouter usage:
+# to reproduce this repo's inference flow with your own backend:
 #   1. call format_prompt for each task
 #   2. send the prompt to your model/backend
 #   3. evaluate responses with extract_answer/evaluate_answer_with_error_type

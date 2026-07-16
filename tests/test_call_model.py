@@ -5,7 +5,7 @@ import json
 import pytest
 import requests
 
-import run_openrouter
+import run_benchmark
 import throttle
 
 
@@ -117,13 +117,13 @@ def streamed_success(content="FINAL ANSWER: e2e4", reasoning=None):
 @pytest.fixture()
 def inferencer(monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
-    return run_openrouter.OpenrouterInferencer("anthropic/claude-haiku-4.5", max_retries=4, backend="vercel-gateway")
+    return run_benchmark.GatewayInferencer("anthropic/claude-haiku-4.5", max_retries=4)
 
 
 @pytest.fixture()
 def no_sleep(monkeypatch):
     sleeps = []
-    monkeypatch.setattr(run_openrouter.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(run_benchmark.time, "sleep", lambda seconds: sleeps.append(seconds))
     return sleeps
 
 
@@ -224,14 +224,14 @@ def test_stream_parity_with_nonstreamed_body(inferencer):
     call = inferencer.call_model("prompt", session=session)
 
     reference_message = body["choices"][0]["message"]
-    expected_thinking, expected_source = run_openrouter.extract_thinking(reference_message)
-    expected_answer, expected_extracted_ok = run_openrouter.extract_answer(reference_message["content"])
+    expected_thinking, expected_source = run_benchmark.extract_thinking(reference_message)
+    expected_answer, expected_extracted_ok = run_benchmark.extract_answer(reference_message["content"])
 
     assert call.ok
     assert call.content == reference_message["content"]
     assert call.usage == body["usage"]
     assert (call.thinking_content, call.thinking_source) == (expected_thinking, expected_source)
-    streamed_answer, streamed_ok = run_openrouter.extract_answer(call.content)
+    streamed_answer, streamed_ok = run_benchmark.extract_answer(call.content)
     assert (streamed_answer, streamed_ok) == (expected_answer, expected_extracted_ok) == ("e2e4", True)
     # The reassembled message is byte-identical where downstream code looks
     assert call.raw_message["content"] == reference_message["content"]
@@ -350,7 +350,7 @@ def test_merge_reasoning_fragments_without_index():
         {"type": "reasoning.summary", "summary": "short"},
         {"type": "reasoning.text", "text": "again", "signature": "sig-1"},
     ]:
-        run_openrouter._merge_reasoning_fragment(entries, indexed, fragment)
+        run_benchmark._merge_reasoning_fragment(entries, indexed, fragment)
     assert entries == [
         {"type": "reasoning.text", "text": "Hello"},
         {"type": "reasoning.summary", "summary": "short"},
@@ -362,18 +362,18 @@ def test_merge_reasoning_fragments_without_index():
 
 
 def test_adaptive_thinking_version_detection():
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-sonnet-5") is True
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-5.1") is True
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-fable-5") is True
+    assert run_benchmark.anthropic_adaptive_thinking("anthropic/claude-sonnet-5") is True
+    assert run_benchmark.anthropic_adaptive_thinking("anthropic/claude-opus-5.1") is True
+    assert run_benchmark.anthropic_adaptive_thinking("anthropic/claude-fable-5") is True
     # Probe-verified 2026-07-10: the adaptive interface starts at 4.7, not 5 — opus-4.7/4.8
     # reject thinking.type.enabled, while opus-4.6/sonnet-4.6/haiku-4.5 accept it.
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-4.8") is True
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-4.7") is True
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-opus-4.6") is False
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-sonnet-4.6") is False
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-haiku-4.5") is False
-    assert run_openrouter.anthropic_adaptive_thinking("anthropic/claude-3.5-haiku") is False
-    assert run_openrouter.anthropic_adaptive_thinking("openai/gpt-5.5") is False
+    assert run_benchmark.anthropic_adaptive_thinking("anthropic/claude-opus-4.8") is True
+    assert run_benchmark.anthropic_adaptive_thinking("anthropic/claude-opus-4.7") is True
+    assert run_benchmark.anthropic_adaptive_thinking("anthropic/claude-opus-4.6") is False
+    assert run_benchmark.anthropic_adaptive_thinking("anthropic/claude-sonnet-4.6") is False
+    assert run_benchmark.anthropic_adaptive_thinking("anthropic/claude-haiku-4.5") is False
+    assert run_benchmark.anthropic_adaptive_thinking("anthropic/claude-3.5-haiku") is False
+    assert run_benchmark.anthropic_adaptive_thinking("openai/gpt-5.5") is False
 
 
 def native_body(thinking_text="Summarized reasoning about the position.", include_thinking=True):
@@ -456,9 +456,7 @@ def native_sse_lines(body, piece_len=6):
 
 def test_claude5_thinking_routes_to_native_endpoint(monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
-    inferencer = run_openrouter.OpenrouterInferencer(
-        "anthropic/claude-sonnet-5", enable_thinking=True, backend="vercel-gateway"
-    )
+    inferencer = run_benchmark.GatewayInferencer("anthropic/claude-sonnet-5", enable_thinking=True)
     session = ScriptedSession([FakeStreamResponse(native_sse_lines(native_body()))])
     call = inferencer.call_model("prompt", session=session)
 
@@ -486,9 +484,7 @@ def test_native_stream_truncation_is_stream_drop(monkeypatch, no_sleep):
     """A native stream cut before message_delta/message_stop (the 340s wall shape that
     burned 70+ billed sonnet calls on 2026-07-13) is a billed-risk stream_drop."""
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
-    inferencer = run_openrouter.OpenrouterInferencer(
-        "anthropic/claude-sonnet-5", enable_thinking=True, backend="vercel-gateway", max_retries=4
-    )
+    inferencer = run_benchmark.GatewayInferencer("anthropic/claude-sonnet-5", enable_thinking=True, max_retries=4)
 
     def truncated():
         lines = native_sse_lines(native_body())
@@ -505,9 +501,7 @@ def test_native_stream_truncation_is_stream_drop(monkeypatch, no_sleep):
 
 def test_claude5_without_thinking_stays_on_chat_completions(monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
-    inferencer = run_openrouter.OpenrouterInferencer(
-        "anthropic/claude-sonnet-5", enable_thinking=False, backend="vercel-gateway"
-    )
+    inferencer = run_benchmark.GatewayInferencer("anthropic/claude-sonnet-5", enable_thinking=False)
     session = ScriptedSession([streamed_success()])
     call = inferencer.call_model("prompt", session=session)
     assert session.calls[0]["url"] == "https://ai-gateway.vercel.sh/v1/chat/completions"
@@ -517,11 +511,11 @@ def test_claude5_without_thinking_stays_on_chat_completions(monkeypatch):
 def test_native_parse_thinking_withheld_and_absent():
     # Thinking block present but text withheld (empty) -> encrypted_only
     withheld = native_body(thinking_text="", include_thinking=True)
-    content, thinking, source, usage = run_openrouter.parse_native_anthropic_message(withheld)
+    content, thinking, source, usage = run_benchmark.parse_native_anthropic_message(withheld)
     assert (content, thinking, source) == ("FINAL ANSWER: e2e4", "", "encrypted_only")
     # No thinking block at all (adaptive skipped thinking) -> none
     skipped = native_body(include_thinking=False)
-    content, thinking, source, usage = run_openrouter.parse_native_anthropic_message(skipped)
+    content, thinking, source, usage = run_benchmark.parse_native_anthropic_message(skipped)
     assert (thinking, source) == ("", "none")
     assert usage["completion_tokens"] == 900
 
@@ -549,7 +543,7 @@ def test_runner_end_to_end_threads(inferencer, monkeypatch, tmp_path):
     tasks = [make_task(index) for index in range(30)]
     session = ScriptedSession([streamed_success() for _ in range(30)])
     lock_free_session = session  # ScriptedSession.pop(0) is GIL-atomic enough for identical outcomes
-    monkeypatch.setattr(run_openrouter, "_get_thread_session", lambda: lock_free_session)
+    monkeypatch.setattr(run_benchmark, "_get_thread_session", lambda: lock_free_session)
 
     # Live DB mirroring via the record hook (main() wires this identically)
     conn = storage.connect(tmp_path / "test.sqlite3")
@@ -580,8 +574,8 @@ def test_runner_end_to_end_threads(inferencer, monkeypatch, tmp_path):
     assert len(lines) == 30
 
     # Resume: every task complete -> zero incomplete
-    existing = run_openrouter.load_existing_results(jsonl_path)
-    incomplete, complete = run_openrouter.filter_incomplete_tasks(tasks, existing)
+    existing = run_benchmark.load_existing_results(jsonl_path)
+    incomplete, complete = run_benchmark.filter_incomplete_tasks(tasks, existing)
     assert incomplete == [] and len(complete) == 30
 
 
@@ -605,13 +599,13 @@ def test_resume_keeps_capped_rows_unless_retry_capped():
         tasks[4]["task_id"]: result_for(tasks[4], "format_error", response=""),  # scrub-shaped poison row
     }
 
-    incomplete, complete = run_openrouter.filter_incomplete_tasks(tasks, existing)
+    incomplete, complete = run_benchmark.filter_incomplete_tasks(tasks, existing)
     assert {task["task_id"] for task in incomplete} == {tasks[2]["task_id"], tasks[4]["task_id"]}, (
         "ERROR rows and empty non-cap rows re-run; both cap shapes are kept"
     )
     assert len(complete) == 3
 
-    incomplete, complete = run_openrouter.filter_incomplete_tasks(tasks, existing, retry_capped=True)
+    incomplete, complete = run_benchmark.filter_incomplete_tasks(tasks, existing, retry_capped=True)
     assert {task["task_id"] for task in incomplete} == {
         tasks[1]["task_id"], tasks[2]["task_id"], tasks[3]["task_id"], tasks[4]["task_id"],
     }

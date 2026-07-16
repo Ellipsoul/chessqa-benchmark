@@ -1,15 +1,11 @@
 """ChessQA evaluation runner: benchmark JSONL -> LLM gateway -> scored results.
 
-Descended from the single-file harness used for all of the paper's 23 runs (which spoke
-only to OpenRouter). This version supports two selectable backends via ``--backend``:
-
-- ``vercel-gateway`` (default): Vercel AI Gateway's OpenAI-compatible endpoint. Auth via
-  the ``AI_GATEWAY_API_KEY`` env var (fallback: ``VERCEL_OIDC_TOKEN``). Verified live:
-  the gateway returns per-call dollar cost in ``usage`` (cost/gateway_cost/market_cost),
-  so cost columns populate on both backends; the dashboard adds request-level logs.
-- ``openrouter``: the paper's original transport, kept for apples-to-apples comparison
-  runs. Auth via ``OPENROUTER_API_KEY`` env var, falling back to the legacy
-  ``../keys/api_keys.json`` beside the checkout (``{"openrouter_api_key": "..."}``).
+Descended from the single-file harness used for all of the paper's 23 runs. All inference
+is routed through the Vercel AI Gateway's OpenAI-compatible endpoint (plus its
+Anthropic-native /v1/messages endpoint for adaptive-thinking Claude models). Auth via the
+``AI_GATEWAY_API_KEY`` env var (fallback: ``VERCEL_OIDC_TOKEN``). Verified live: the
+gateway returns per-call dollar cost in ``usage`` (cost/gateway_cost/market_cost), so
+cost columns populate; the dashboard adds request-level logs.
 
 End-to-end flow:
 
@@ -22,7 +18,7 @@ End-to-end flow:
    ``--use-format-example-group``.
 4. Fan out over a ``ThreadPoolExecutor`` (``--workers``) paced by a shared rate limiter
    (``--rps``/``--burst``; see eval/throttle.py for the retry/backoff policy); each worker
-   POSTs to the selected backend as a STREAMING (SSE) request — reassembled by
+   POSTs to the gateway as a STREAMING (SSE) request — reassembled by
    ``consume_chat_sse`` (chat completions) or ``consume_anthropic_sse`` (the
    Anthropic-native /v1/messages path for adaptive-thinking models) into the
    non-streaming message shape — so long generations keep bytes moving and survive the
@@ -38,8 +34,8 @@ End-to-end flow:
    the reasoning trace (that gap is this project's Phase 3).
 
 Outputs, all under ``--output-dir`` and all named ``<model with / and : -> _>`` plus
-variant suffixes ``-thinking`` / ``-piecearr`` / ``-fmt2`` / ``-openrouter`` (flags must
-match for resume and ``--eval-only`` to find the file; gateway runs get no backend suffix):
+variant suffixes ``-thinking`` / ``-piecearr`` / ``-fmt2`` (flags must match for resume
+and ``--eval-only`` to find the file):
 - ``<name>.jsonl``  one result per line: the full task + an ``inference`` block (prompt,
   response, thinking_content, thinking_source, extracted answer, correctness, error_type,
   usage, raw_message, provider_meta, attempts, latency_ms). This file is CANONICAL.
@@ -74,10 +70,7 @@ from tqdm import tqdm
 import storage
 import throttle
 
-BACKEND_URLS = {
-    "vercel-gateway": "https://ai-gateway.vercel.sh/v1/chat/completions",
-    "openrouter": "https://openrouter.ai/api/v1/chat/completions",
-}
+GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
 
 # One requests.Session per worker thread: connection pooling without sharing a Session
 # across threads (not documented thread-safe).
@@ -120,13 +113,13 @@ def anthropic_adaptive_thinking(model: str) -> bool:
         return False
 
 
-def build_reasoning_payload(model: str, backend: str) -> dict[str, Any]:
+def build_reasoning_payload(model: str) -> dict[str, Any]:
     """Return the thinking config sent when --enable-thinking is set (probe-verified 2026-07-10).
 
     Two regimes, selected per model:
 
     - Classic-thinking models (e.g. claude-haiku-4.5, and non-Anthropic reasoning models):
-      OpenRouter-style ``reasoning: {"effort": "medium"}`` on the chat-completions endpoint —
+      ``reasoning: {"effort": "medium"}`` on the chat-completions endpoint —
       the paper's setting; yields FULL-TEXT traces (``thinking_source: full_text``).
     - Adaptive-thinking models — Claude 5 family and Opus 4.7+ (``anthropic_adaptive_thinking``): full raw
       CoT is withheld by Anthropic (``thinking.display`` accepts only
@@ -139,7 +132,7 @@ def build_reasoning_payload(model: str, backend: str) -> dict[str, Any]:
 
     The returned dict is also recorded per run in ``runs.reasoning_config`` provenance.
     """
-    if backend == "vercel-gateway" and anthropic_adaptive_thinking(model):
+    if anthropic_adaptive_thinking(model):
         return {"type": "adaptive", "display": "summarized"}
     return {"effort": "medium"}
 
@@ -232,41 +225,21 @@ def load_env_file(env_path: Path | None = None) -> None:
             os.environ[key] = value
 
 
-def resolve_api_key(backend: str) -> str:
-    """Resolve the API key for the chosen backend, failing fast with a setup hint.
+def resolve_api_key() -> str:
+    """Resolve the Vercel AI Gateway API key, failing fast with a setup hint.
 
-    vercel-gateway: ``AI_GATEWAY_API_KEY`` env var, falling back to ``VERCEL_OIDC_TOKEN``
-    (the short-lived JWT written to .env.local by ``vercel env pull`` — only useful if the
-    caller exported it into the environment).
-    openrouter: ``OPENROUTER_API_KEY`` env var, falling back to the legacy upstream
-    location ``../keys/api_keys.json`` beside the checkout.
-    Either variable may come from the shell or from the repo-root ``.env`` file
-    (see ``load_env_file``).
+    ``AI_GATEWAY_API_KEY`` env var, falling back to ``VERCEL_OIDC_TOKEN`` (the short-lived
+    JWT written to .env.local by ``vercel env pull`` — only useful if the caller exported
+    it into the environment). Either variable may come from the shell or from the
+    repo-root ``.env`` file (see ``load_env_file``).
     """
-    if backend == "vercel-gateway":
-        api_key = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
-        if not api_key:
-            raise SystemExit(
-                "No Vercel AI Gateway credential found. Put AI_GATEWAY_API_KEY=... in the "
-                "repo-root .env file (cp .env.example .env), or export AI_GATEWAY_API_KEY / "
-                "VERCEL_OIDC_TOKEN in your shell. Keys are created in the Vercel dashboard "
-                "under AI Gateway."
-            )
-        return api_key
-
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if api_key:
-        return api_key
-    keys_path = Path(__file__).parent.parent.parent / "keys" / "api_keys.json"
-    try:
-        with open(keys_path) as keys_file:
-            api_key = json.load(keys_file).get("openrouter_api_key")
-    except FileNotFoundError:
-        api_key = None
+    api_key = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
     if not api_key:
         raise SystemExit(
-            "No OpenRouter credential found. Set OPENROUTER_API_KEY or provide "
-            f"{keys_path} containing {{\"openrouter_api_key\": \"...\"}}."
+            "No Vercel AI Gateway credential found. Put AI_GATEWAY_API_KEY=... in the "
+            "repo-root .env file (cp .env.example .env), or export AI_GATEWAY_API_KEY / "
+            "VERCEL_OIDC_TOKEN in your shell. Keys are created in the Vercel dashboard "
+            "under AI Gateway."
         )
     return api_key
 
@@ -274,7 +247,7 @@ def resolve_api_key(backend: str) -> str:
 def extract_thinking(message: dict[str, Any]) -> tuple[str, str]:
     """Extract the thinking trace and classify its fidelity.
 
-    Vercel AI Gateway (and newer OpenRouter responses) return a typed
+    The Vercel AI Gateway returns a typed
     ``reasoning_details`` array whose block types make trace fidelity machine-legible —
     the signal that gates Phase 3 depth:
     - ``reasoning.text``: the actual chain-of-thought (Anthropic-style, may be signed).
@@ -419,7 +392,7 @@ def consume_chat_sse(
             if not raw_line:
                 continue
             line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
-            if line.startswith(":"):  # SSE comment keepalive (e.g. ": OPENROUTER PROCESSING")
+            if line.startswith(":"):  # SSE comment keepalive
                 continue
             if not line.startswith("data:"):
                 continue
@@ -430,7 +403,7 @@ def consume_chat_sse(
             chunk = json.loads(payload)
             data_events += 1
             if chunk.get("error"):
-                # Mid-stream error event (OpenRouter/gateway convention): the provider or
+                # Mid-stream error event (gateway convention): the provider or
                 # gateway aborted the generation. Billed-risk if tokens already flowed.
                 raise StreamDrop(
                     RuntimeError(f"in-stream error event: {json.dumps(chunk['error'])[:300]}"), stream_info()
@@ -840,7 +813,7 @@ def extract_answer(response: str) -> tuple[str, bool]:
 
 def calculate_total_usage(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate cost/token/extraction stats across results (a result with no usage dict
-    counts as an API error). Costs come from OpenRouter's usage accounting per call."""
+    counts as an API error). Costs come from the gateway's per-call usage accounting."""
     total_cost = 0.0
     total_prompt_tokens = 0
     total_completion_tokens = 0
@@ -954,7 +927,7 @@ def evaluate_answer_with_error_type(
 
 def run_one_task(
     task: dict[str, Any],
-    inferencer: "OpenrouterInferencer",
+    inferencer: "GatewayInferencer",
     format_example_group: int,
     limiter: "throttle.RateLimiter | None",
     progress: "RunProgress | None" = None,
@@ -1004,31 +977,24 @@ def build_run_key(model: str, enable_thinking: bool, variant_suffix: str) -> str
     return run_key + variant_suffix
 
 
-def _build_variant_suffix(add_context: bool, format_example_group: int, backend: str = "vercel-gateway") -> str:
-    """Return a short suffix for filenames to distinguish experiment variants.
-
-    The default backend (vercel-gateway) adds no suffix; OpenRouter runs are tagged
-    ``-openrouter`` so results from the two transports never collide or cross-resume.
-    """
+def _build_variant_suffix(add_context: bool, format_example_group: int) -> str:
+    """Return a short suffix for filenames to distinguish experiment variants."""
     parts = []
     if add_context:
         parts.append("piecearr")
     if format_example_group == 2:
         parts.append("fmt2")
-    if backend == "openrouter":
-        parts.append("openrouter")
     return ("-" + "-".join(parts)) if parts else ""
 
 
-class OpenrouterInferencer:
-    """Thin client around a chat-completions backend plus result-file management.
+class GatewayInferencer:
+    """Thin client around the Vercel AI Gateway plus result-file management.
 
-    (Name kept from upstream for continuity; it now speaks both Vercel AI Gateway and
-    OpenRouter.) Holds the run configuration (backend, model, retries, token budget,
-    thinking mode, filename suffix) and owns three concerns: calling the API with retries
-    (``call_model``), orchestrating sequential/parallel inference (``run_inference``),
-    and incremental result persistence (``_save_*``). Credentials come from
-    ``resolve_api_key`` — see the module docstring.
+    Holds the run configuration (model, retries, token budget, thinking mode, filename
+    suffix) and owns three concerns: calling the API with retries (``call_model``),
+    orchestrating sequential/parallel inference (``run_inference``), and incremental
+    result persistence (``_save_*``). Credentials come from ``resolve_api_key`` — see
+    the module docstring.
     """
 
     def __init__(
@@ -1040,7 +1006,6 @@ class OpenrouterInferencer:
         max_tokens: int = 2048,
         enable_thinking: bool = False,
         filename_suffix: str = "",
-        backend: str = "vercel-gateway",
     ):
         self.model = model
         self.add_context = add_context
@@ -1050,9 +1015,8 @@ class OpenrouterInferencer:
         self.enable_thinking = enable_thinking
         # Additional filename suffix to differentiate experiment variants in outputs
         self.filename_suffix = filename_suffix
-        self.backend = backend
-        self.api_key = resolve_api_key(backend)
-        self.url = BACKEND_URLS[backend]
+        self.api_key = resolve_api_key()
+        self.url = GATEWAY_URL
 
     def call_model(
         self,
@@ -1074,9 +1038,6 @@ class OpenrouterInferencer:
           billed wall-kill corpses).
         - ``--enable-thinking`` maps to ``build_reasoning_payload`` (probe-verified; see
           its docstring for the Claude 5 adaptive-thinking limitation).
-        - OpenRouter-only fields: ``usage: {include: true}`` (per-call cost accounting)
-          and hardcoded provider-order pins for three models whose responses upstream
-          found unreliable on other providers.
 
         Retry policy (see eval/throttle.py): 429/502/503/connection failures retry up to
         ``max_retries`` with Retry-After honored (a 429 penalizes the *shared* limiter so
@@ -1104,18 +1065,16 @@ class OpenrouterInferencer:
         # Adaptive-thinking (Claude 5 family, Opus 4.7+) runs must go through the gateway's Anthropic-native
         # endpoint: adaptive thinking (and its display=summarized traces) cannot be
         # expressed on the OpenAI-compatible endpoint. See build_reasoning_payload.
-        use_native_anthropic = (
-            self.enable_thinking and self.backend == "vercel-gateway" and anthropic_adaptive_thinking(self.model)
-        )
+        use_native_anthropic = self.enable_thinking and anthropic_adaptive_thinking(self.model)
         request_url = self.url
 
         if self.enable_thinking:
             if use_native_anthropic:
                 request_url = ANTHROPIC_NATIVE_URL
                 headers["anthropic-version"] = "2023-06-01"
-                data["thinking"] = build_reasoning_payload(self.model, self.backend)
+                data["thinking"] = build_reasoning_payload(self.model)
             else:
-                data["reasoning"] = build_reasoning_payload(self.model, self.backend)
+                data["reasoning"] = build_reasoning_payload(self.model)
 
         # The 340s-wall fix: stream EVERY request so bytes move on the wire continuously.
         # The native path streamed too as of 2026-07-13 — adaptive sonnet-5 generations
@@ -1126,31 +1085,6 @@ class OpenrouterInferencer:
         data["stream"] = True
         if not use_native_anthropic:
             data["stream_options"] = {"include_usage": True}
-
-        if self.backend == "openrouter":
-            data["usage"] = {"include": True}
-
-            if self.model == "qwen/qwen3-next-80b-a3b-thinking":
-                data["provider"] = {
-                    "order": [
-                        "google-vertex",
-                        "together",
-                    ]
-                }
-
-            if self.model == "deepseek/deepseek-chat-v3.1":
-                data["provider"] = {
-                    "order": [
-                        "fireworks",
-                    ]
-                }
-
-            if self.model == "deepseek/deepseek-r1-0528":
-                data["provider"] = {
-                    "order": [
-                        "google-vertex",
-                    ]
-                }
 
         transport = session if session is not None else requests
         attempts: list[dict[str, Any]] = []
@@ -1540,7 +1474,7 @@ def setup_results_db(args, tasks: list[dict[str, Any]]):
     """Open the SQLite index and register this run; returns (conn, run_id) or (None, None).
 
     Shared by normal and --eval-only modes. Honors --no-db. Provenance captured per
-    run_key: model/backend/variant flags, the exact reasoning payload that will be sent,
+    run_key: model/variant flags, the exact reasoning payload that will be sent,
     dataset hash, best-effort git commit, and the full CLI namespace.
     """
     if args.no_db:
@@ -1552,19 +1486,19 @@ def setup_results_db(args, tasks: list[dict[str, Any]]):
     run_key = build_run_key(
         args.model,
         args.enable_thinking,
-        _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend),
+        _build_variant_suffix(args.add_context, args.use_format_example_group),
     )
     run_id = storage.get_or_create_run(
         conn,
         run_key,
         {
             "model": args.model,
-            "backend": args.backend,
+            "backend": "vercel-gateway",
             "enable_thinking": args.enable_thinking,
             "add_context": args.add_context,
             "format_example_group": args.use_format_example_group,
             "max_tokens": args.max_tokens,
-            "reasoning_config": (build_reasoning_payload(args.model, args.backend) if args.enable_thinking else None),
+            "reasoning_config": (build_reasoning_payload(args.model) if args.enable_thinking else None),
             "dataset_hash": dataset_hash,
             "git_commit": storage.git_commit_or_none(Path(__file__).parent.parent),
             "cli_args": vars(args),
@@ -1635,7 +1569,7 @@ def main():
         model_safe_name = build_run_key(
             args.model,
             args.enable_thinking,
-            _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend),
+            _build_variant_suffix(args.add_context, args.use_format_example_group),
         )
         results_file = args.output_dir / f"{model_safe_name}.jsonl"
 
@@ -1714,7 +1648,7 @@ def main():
             model_safe_name = build_run_key(
                 args.model,
                 args.enable_thinking,
-                _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend),
+                _build_variant_suffix(args.add_context, args.use_format_example_group),
             )
             results_file = args.output_dir / f"{model_safe_name}.jsonl"
             existing_results = load_existing_results(results_file)
@@ -1725,11 +1659,11 @@ def main():
             print(f"Tasks needing inference: {len(incomplete_tasks)}")
 
         # SQLite results index (the JSONL stays canonical; the DB is derived + rebuildable).
-        variant_suffix = _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend)
+        variant_suffix = _build_variant_suffix(args.add_context, args.use_format_example_group)
         conn, run_id = setup_results_db(args, tasks)
 
         if incomplete_tasks:
-            inferencer = OpenrouterInferencer(
+            inferencer = GatewayInferencer(
                 args.model,
                 args.add_context,
                 args.max_retries,
@@ -1737,7 +1671,6 @@ def main():
                 args.max_tokens,
                 args.enable_thinking,
                 filename_suffix=variant_suffix,
-                backend=args.backend,
             )
 
             start_time = time.time()
@@ -1889,7 +1822,7 @@ def main():
     model_safe_name = build_run_key(
         args.model,
         args.enable_thinking,
-        _build_variant_suffix(args.add_context, args.use_format_example_group, args.backend),
+        _build_variant_suffix(args.add_context, args.use_format_example_group),
     )
     results_file = args.output_dir / f"{model_safe_name}.jsonl"
     stats_file = args.output_dir / f"{model_safe_name}_stats.json"
@@ -1922,7 +1855,7 @@ def main():
             "workers": num_workers,
             "format_example_group": args.use_format_example_group,
             "enable_thinking": args.enable_thinking,
-            "backend": args.backend,
+            "backend": "vercel-gateway",
             "rps": args.rps,
             "burst": args.burst,
         },
@@ -2017,8 +1950,6 @@ def parse_arguments():
     Caveats (upstream defaults kept as-is):
     - Path defaults resolve two directories above this script (upstream's layout), which
       lands *outside* this repo — always pass --dataset-root benchmark --output-dir results.
-    - The commented-out --model lines are upstream's roster of evaluated models, kept as a
-      convenient reference for reproduction runs.
     """
     parser = argparse.ArgumentParser()
 
@@ -2029,33 +1960,11 @@ def parse_arguments():
     parser.add_argument(
         "--dataset-root", type=Path, default=default_dataset_root, help="Root directory containing JSONL task files"
     )
-    # parser.add_argument('--model', type=str, required=True,
-    #                    help='OpenRouter model ID, e.g., google/gemini-2.5-flash')
-    # parser.add_argument('--model', type=str, default='mistralai/mistral-medium-3.1')
-    # parser.add_argument('--model', type=str, default='google/gemini-2.5-pro')
-    # parser.add_argument('--model', type=str, default='google/gemini-2.5-flash')
-    # parser.add_argument('--model', type=str, default='anthropic/claude-3.5-haiku')
-    # parser.add_argument('--model', type=str, default='anthropic/claude-haiku-4.5')
-    parser.add_argument("--model", type=str, default="anthropic/claude-sonnet-4.5")
-    # parser.add_argument('--model', type=str, default='anthropic/claude-sonnet-4')
-    # parser.add_argument('--model', type=str, default='deepseek/deepseek-chat-v3.1')
-    # parser.add_argument('--model', type=str, default='deepseek/deepseek-r1-0528')
-    # parser.add_argument('--model', type=str, default='openai/gpt-5-chat')
-    # parser.add_argument('--model', type=str, default='openai/gpt-5')
-    # parser.add_argument('--model', type=str, default='qwen/qwen3-next-80b-a3b-instruct')
-    # parser.add_argument('--model', type=str, default='qwen/qwen3-next-80b-a3b-thinking')
-    # parser.add_argument('--model', type=str, default='qwen/qwen3-max')
-    # parser.add_argument('--model', type=str, default='meta-llama/llama-4-maverick')
-    # parser.add_argument('--model', type=str, default='meta-llama/llama-4-scout')
-    # parser.add_argument('--model', type=str, default='google/gemma-3-27b-it')
     parser.add_argument(
-        "--backend",
+        "--model",
         type=str,
-        choices=["vercel-gateway", "openrouter"],
-        default="vercel-gateway",
-        help="Inference transport: Vercel AI Gateway (default; AI_GATEWAY_API_KEY) or OpenRouter "
-        "(the paper's original transport; OPENROUTER_API_KEY or ../keys/api_keys.json). "
-        "OpenRouter results files get an -openrouter suffix.",
+        default="anthropic/claude-sonnet-4.5",
+        help="Gateway model slug, e.g. anthropic/claude-haiku-4.5 (canonical fleet: docs/model-fleet.md)",
     )
     parser.add_argument("--output-dir", type=Path, default=default_output_dir, help="Directory to save results")
     parser.add_argument("--max-tasks", type=int, default=None)

@@ -40,23 +40,20 @@ echo "Installing core dependencies ..."
 echo "Installing dev dependencies (ruff) ..."
 "${PIP}" install -r "${ROOT}/requirements-dev.txt"
 
-# API keys (OpenRouter)
+# API keys (Vercel AI Gateway)
 echo
-echo "API key setup (OpenRouter)"
-if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-  if [ -f "${ROOT}/../keys/api_keys.json" ]; then
-    echo "Found ../keys/api_keys.json (used by eval/run_openrouter.py)"
-  elif [ -f "${ROOT}/keys/openrouter.key" ]; then
-    export OPENROUTER_API_KEY="$(cat "${ROOT}/keys/openrouter.key")"
-    echo "Loaded OPENROUTER_API_KEY from keys/openrouter.key"
+echo "API key setup (Vercel AI Gateway)"
+if [ -z "${AI_GATEWAY_API_KEY:-}" ]; then
+  if [ -f "${ROOT}/.env" ] && grep -q "^AI_GATEWAY_API_KEY=." "${ROOT}/.env"; then
+    echo "Found AI_GATEWAY_API_KEY in .env (loaded by the eval runner at startup)"
   else
-    echo "OPENROUTER_API_KEY not set. For cloud inference:"
-    echo "  export OPENROUTER_API_KEY=\"your_key\""
-    echo "  or save to ../keys/api_keys.json (see CLAUDE.md)"
-    echo "  Get a key: https://openrouter.ai/"
+    echo "AI_GATEWAY_API_KEY not set. For cloud inference:"
+    echo "  cp .env.example .env   # then fill in AI_GATEWAY_API_KEY"
+    echo "  or: export AI_GATEWAY_API_KEY=\"your_key\""
+    echo "  Keys are created in the Vercel dashboard under AI Gateway."
   fi
 else
-  echo "Detected OPENROUTER_API_KEY in environment"
+  echo "Detected AI_GATEWAY_API_KEY in environment"
 fi
 
 # Data files
@@ -104,7 +101,7 @@ echo "  source .venv/bin/activate"
 echo "  make lint          # run ruff"
 echo
 echo "  # Run inference against checked-in benchmark:"
-echo "  python eval/run_openrouter.py --dataset-root benchmark --model anthropic/claude-sonnet-4.5 \\"
+echo "  python eval/run_benchmark.py --dataset-root benchmark --model anthropic/claude-sonnet-4.5 \\"
 echo "    --output-dir results --workers 256 --max-tasks 5"
 echo
 echo "Setup complete."

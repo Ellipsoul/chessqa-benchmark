@@ -17,7 +17,7 @@ import chess
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import storage  # noqa: E402
-from run_openrouter import format_prompt  # noqa: E402
+from run_benchmark import format_prompt  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MIN_RESULTS = 50

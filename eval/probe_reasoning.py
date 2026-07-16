@@ -1,6 +1,6 @@
 """One-shot probe: which reasoning payload shape actually enables extended thinking?
 
-Background: the paper's OpenRouter harness sent ``reasoning: {"effort": "medium"}``. Through
+Background: the paper's harness sent ``reasoning: {"effort": "medium"}``. Through
 the Vercel AI Gateway that shape yielded ZERO reasoning tokens across a full 50-task
 Anthropic run — the gateway maps a token *budget* to Anthropic's thinking, and effort-only
 appears to be ignored. This script tests candidate shapes with one tiny request each
@@ -16,7 +16,7 @@ import json
 
 import requests
 
-from run_openrouter import BACKEND_URLS, extract_thinking, load_env_file, resolve_api_key
+from run_benchmark import GATEWAY_URL, extract_thinking, load_env_file, resolve_api_key
 
 CANDIDATE_PAYLOADS = [
     ("effort-only (current, believed broken)", {"effort": "medium"}),
@@ -39,8 +39,8 @@ def main() -> None:
     args = parser.parse_args()
 
     load_env_file()
-    api_key = resolve_api_key("vercel-gateway")
-    url = BACKEND_URLS["vercel-gateway"]
+    api_key = resolve_api_key()
+    url = GATEWAY_URL
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     print(f"Probing {args.model} via {url}\n")

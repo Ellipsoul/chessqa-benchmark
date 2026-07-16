@@ -1,6 +1,6 @@
 """Rate limiting and retry classification for the ChessQA eval runner.
 
-Kept separate from run_openrouter.py so it is unit-testable without importing chess/tqdm,
+Kept separate from run_benchmark.py so it is unit-testable without importing chess/tqdm,
 and because it has no persistence concerns. Two responsibilities:
 
 1. ``RateLimiter``: a thread-shared token bucket with a global penalty gate. All worker

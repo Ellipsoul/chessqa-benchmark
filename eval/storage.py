@@ -53,7 +53,6 @@ STARTUP_LOCK_ATTEMPTS = 10
 # Filename-suffix tokens appended by the runner (see _build_variant_suffix / -thinking),
 # in the order they appear in a stem; parsed back off right-to-left by run_meta_from_filename.
 _SUFFIX_FLAGS = [
-    ("-openrouter", ("backend", "openrouter")),
     ("-fmt2", ("format_example_group", 2)),
     ("-piecearr", ("add_context", True)),
     ("-thinking", ("enable_thinking", True)),

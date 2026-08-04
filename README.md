@@ -25,6 +25,15 @@ way, ChessQA captures a more comprehensive picture of chess ability and understa
 - `results/`: per‑model outputs (`*.jsonl`, `*_pretty.json`, `*_stats.json`)
 - `docs/`: project brief, the ChessQA paper, and planning notes
 
+## Contributor and agent context
+
+Start with [`AGENTS.md`](AGENTS.md), then use the lifecycle-aware
+[`docs/README.md`](docs/README.md) to load only the relevant research or implementation
+history. [`docs/STATUS.md`](docs/STATUS.md) is the concise handoff shared with the sibling
+ChessQA Explorer repository. Claude Code users can continue to use the retained
+[`CLAUDE.md`](CLAUDE.md); shared current guidance is kept provider-neutral in
+`AGENTS.md`.
+
 ## Deviations from Upstream (CSSLab/chessqa-benchmark)
 
 This repo is a fork of [CSSLab/chessqa-benchmark](https://github.com/CSSLab/chessqa-benchmark)

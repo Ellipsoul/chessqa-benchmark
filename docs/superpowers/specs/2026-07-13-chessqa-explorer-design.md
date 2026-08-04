@@ -89,7 +89,7 @@ Reads the SQLite, writes the showcase repo's `public/data/` (default
   `outcomes: {run_slug: outcome_code}` for the heatmap).
 - **`categories/<slug>.json`** (~30–200 KB raw; Short Tactics largest): the category's
   tasks in display order, each with question, resolved prompt (placeholders filled with
-  the same logic as `format_prompt()` in `eval/run_openrouter.py`, matching each run's
+  the same logic as `format_prompt()` in `eval/run_benchmark.py`, matching each run's
   format-example group), input FEN + UCI move list when input is `"FEN | moves"`, task
   metadata verbatim, correct answer + its primitives, and `results[]` per run: extracted
   answer, `error_type` (raw), outcome code, legality, primitives, cost_usd,

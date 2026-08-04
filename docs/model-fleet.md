@@ -1,12 +1,13 @@
-# ChessQA model fleet (canonical)
+# ChessQA model fleet reference
 
-The models the full ChessQA benchmark runs on, split into a **budget tier** (light enough
-to full-run now) and a **funded tier** (deferred until funding is secured). Derived from
+The candidate models for full ChessQA benchmark runs, originally split into a **budget
+tier** and a **funded tier** before the smoke campaign. Derived from
 the 2026-07-10 fidelity/cost trials — every number below is reproducible from
 `docs/model-trials/2026-07-10-fidelity-and-cost.md` (probe outputs, trial rows, and the
-SQL against `results/chessqa.sqlite3`). Update this file whenever the fleet changes;
-treat it as the single source of truth for *which* models we run and *how each must be
-called*.
+SQL against `results/chessqa.sqlite3`). The calling quirks remain the operational
+reference. The tier tables are the pre-smoke proposal, not an approved current run list:
+measured costs invalidated their x1..x6 planning bands, and Aron's tier re-cut is still
+pending. Do not start a full run from these tables without an explicit decision.
 
 Status (2026-07-12): **smoke campaign half done, paused on a transport defect.** 7 of 14
 smokes completed clean, 3 completed with ERROR rows, 7 held — superseded, see below.
@@ -45,7 +46,7 @@ full_run_cost($) = 0.8M x P_in + 3,500 x trial_task_completion_tokens x k x P_ou
   (`--N-samples-per-task 1`, $0.2–3.5 per model) collapses the band to ±20% — **always
   smoke an expensive model before committing to its full run.**
 
-## Tier 1 — budget fleet (full runs now)
+## Historical proposal: Tier 1 budget fleet
 
 Selection: worst-case (x6) cost ≤ ~$350 each, while still covering 5 providers, three
 `full_text` reasoners for Phase 3, one summary-class reasoner, and a non-reasoning
@@ -66,7 +67,7 @@ Near-free companion runs worth bundling: claude-haiku-4.5 **non-thinking** (~$15
 measured profile — completes the thinking/non-thinking contrast cheaply) and the
 50-task smokes for Tier 2 (~$10–25 total across all eight).
 
-## Tier 2 — funded fleet (deferred until funding)
+## Historical proposal: Tier 2 funded fleet
 
 The frontier-update headline claims (paper Phase 2) come from this tier.
 
@@ -161,13 +162,13 @@ minimax-m3):**
 results filenames encode variant suffixes (`-thinking`, `-piecearr`, `-fmt2`)
 and resume/`--eval-only` require identical flags to find the file.
 
-**Transport (FIXED 2026-07-12, PR #20):** the gateway kills **non-streaming** requests at
-~340s of wire silence and bills the killed attempts. The runner now streams every
-chat-completions request (SSE, reassembled by `consume_chat_sse`) so decode speed no
-longer caps completable tokens; kill-shot verified at 433s / 32,768 tokens on
-deepseek-v4-pro with zero connection errors. The Anthropic-native `/v1/messages` path
-(adaptive models) remains non-streaming by design — its short summarized runs never hit
-the wall. Mid-stream drops after tokens arrived are `stream_drop` (billed-risk, 2-attempt
-cap); `ttft_ms` is recorded per result. Evidence and history:
-`docs/model-trials/2026-07-12-smoke-campaign.md` (Incident 2). Still track real spend via
-`GET https://ai-gateway.vercel.sh/v1/credits`, not by summing `usage.cost`.
+**Transport (FIXED 2026-07-12, PRs #20 and #28):** the gateway kills **non-streaming**
+requests at ~340s of wire silence and bills the killed attempts. The runner now streams
+both chat-completions requests (`consume_chat_sse`) and Anthropic-native `/v1/messages`
+requests (`consume_anthropic_sse`). Mid-stream drops after tokens arrived are
+`stream_drop` (billed-risk, 2-attempt cap); `ttft_ms` is recorded per result. A separate
+~785s total-duration ceiling was also observed; the runner requires positive completion
+evidence so truncated streams become honest failures. Evidence and history:
+`docs/model-trials/2026-07-12-smoke-campaign.md` (Incidents 2–3 and final results). Still
+track real spend via `GET https://ai-gateway.vercel.sh/v1/credits`, not by summing
+`usage.cost`.

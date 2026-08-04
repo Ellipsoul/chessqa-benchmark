@@ -27,6 +27,11 @@ session; this document describes project state, not ownership of uncommitted cha
 - Full 3,500-task fleet runs are not documented as completed. The measured smoke costs
   invalidated the original x1..x6 planning bands, and the fleet tier re-cut still
   requires Aron's decision before paid full runs.
+- Manual chess-expert validation of the 3,500 benchmark tasks is now an approved future
+  slice. A known skewer example demonstrates that deterministic Motifs labels can diverge
+  from the chess concept stated in the prompt. The proposed local review workflow and
+  annotation requirements are recorded in `benchmark-quality-validation.md`; no review UI
+  or expert-label dataset exists yet.
 
 ## Repository boundary
 
@@ -80,6 +85,9 @@ These items need explicit prioritization or design review before implementation:
    sharding, search, or server-backed access.
 6. Revisit time-sensitive provider claims—including Gemini trace semantics, model
    availability, and pricing—when they become relevant to a new paid campaign.
+7. Design and implement the expert benchmark-quality review slice described in
+   `benchmark-quality-validation.md`, beginning with Motifs and preserving the original
+   upstream-compatible benchmark separately from any later corrected version.
 
 ## Safe start for the next slice
 

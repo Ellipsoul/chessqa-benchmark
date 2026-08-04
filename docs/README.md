@@ -15,6 +15,7 @@ their evidence.
 | [`../AGENTS.md`](../AGENTS.md) | active | Repository rules, architecture invariants, safety boundaries, and development workflow |
 | [`STATUS.md`](STATUS.md) | active handoff | Current capabilities, unresolved decisions, and the cross-repository starting point |
 | [`PROJECT_BRIEF_chess_llm_benchmark.md`](PROJECT_BRIEF_chess_llm_benchmark.md) | active strategic charter | Research motivation, four-phase programme, teaching mandate, and known methodological risks |
+| [`benchmark-quality-validation.md`](benchmark-quality-validation.md) | proposed future slice | Expert review interface and durable annotation requirements for validating all 3,500 benchmark tasks before treating their generated labels as chess ground truth |
 | [`model-fleet.md`](model-fleet.md) | active model reference with a pending decision | Calling quirks and measured fleet evidence; its pre-smoke tier tables are historical proposals until Aron approves a re-cut |
 | [`../README.md`](../README.md) | active public/contributor guide | Installation, upstream deviations, dataset construction, and inference usage |
 
